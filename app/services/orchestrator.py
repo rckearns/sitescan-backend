@@ -98,7 +98,28 @@ async def run_source_scan(
         
         if source_id == "sam-gov":
             key = sam_api_key or settings.sam_gov_api_key
-            projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
+            # Check cache — if we already scanned SAM today, skip the API call
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            cached = await session.execute(
+                select(Project).where(
+                    Project.source_id == "sam-gov",
+                    Project.last_seen >= today_start,
+                ).limit(1)
+            )
+            if cached.scalar_one_or_none():
+                logger.info("SAM.gov: using cached results from today")
+                all_cached = await session.execute(
+                    select(Project).where(Project.source_id == "sam-gov", Project.is_active == True)
+                )
+                projects = [{"source_id": "sam-gov", "external_id": p.external_id, "title": p.title,
+                             "description": p.description, "location": p.location, "value": p.value,
+                             "category": p.category, "match_score": p.match_score, "status": p.status,
+                             "posted_date": p.posted_date, "deadline": p.deadline, "agency": p.agency,
+                             "solicitation_number": p.solicitation_number, "naics_code": p.naics_code,
+                             "source_url": p.source_url, "raw_data": p.raw_data}
+                            for p in all_cached.scalars().all()]
+            else:
+                projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
             
         elif source_id == "charleston-permits":
             projects = await scan_charleston_permits(arcgis_url=settings.charleston_arcgis_url)

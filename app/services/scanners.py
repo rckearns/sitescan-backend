@@ -181,33 +181,72 @@ async def scan_charleston_permits(arcgis_url="", record_count=100):
 
 
 async def scan_scbo():
+    """Scrape SC Business Opportunities - Construction category."""
     results = []
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.get("https://scbo.sc.gov/online-edition")
-            resp.raise_for_status()
-            html = resp.text
-            kw = re.compile(r"construct|masonry|restor|structur|foundation|building|renovati|repair|concrete", re.IGNORECASE)
-            blocks = re.split(r"<hr\s*/?>|<HR\s*/?>", html)
-            for i, block in enumerate(blocks):
-                clean = re.sub(r"<[^>]+>", " ", block)
-                clean = re.sub(r"\s+", " ", clean).strip()
-                if len(clean) < 50 or not kw.search(clean):
-                    continue
-                title = clean[:200]
-                cat = classify_project(title, clean)
-                ms = score_match(title, clean)
-                results.append({
-                    "source_id": "scbo",
-                    "external_id": f"scbo-{i}-{abs(hash(title)) % 100000}",
-                    "title": _clean_text(title, 500), "description": _clean_text(clean, 1000),
-                    "location": "South Carolina", "category": cat, "match_score": ms,
-                    "status": "Open", "posted_date": datetime.utcnow(),
-                    "source_url": "https://scbo.sc.gov/online-edition", "raw_data": {"i": i},
-                })
-    except Exception as e:
-        logger.error(f"SCBO error: {e}")
-    logger.info(f"SCBO: Found {len(results)}")
+    today = datetime.utcnow()
+    for days_ago in range(7):
+        d = today - timedelta(days=days_ago)
+        date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
+        url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+                clean = re.sub(r"<[^>]+>", "\n", html)
+                ads = re.split(r"(?i)project\s+name\s*:", clean)
+                for i, ad in enumerate(ads[1:], 1):
+                    ad_lines = [l.strip() for l in ad.split("\n") if l.strip()]
+                    if not ad_lines:
+                        continue
+                    name = ad_lines[0]
+                    full_text = " ".join(ad_lines)
+                    proj_num = ""
+                    loc = "South Carolina"
+                    desc = ""
+                    agency = ""
+                    cost = ""
+                    for j, line in enumerate(ad_lines):
+                        low = line.lower()
+                        if low.startswith("project number"):
+                            proj_num = ad_lines[j+1] if j+1 < len(ad_lines) else ""
+                        elif low.startswith("project location"):
+                            loc = ad_lines[j+1] if j+1 < len(ad_lines) else loc
+                        elif low.startswith("description"):
+                            desc = ad_lines[j+1] if j+1 < len(ad_lines) else ""
+                        elif low.startswith("agency") or low.startswith("owner"):
+                            agency = ad_lines[j+1] if j+1 < len(ad_lines) else ""
+                        elif "cost range" in low:
+                            cost = ad_lines[j+1] if j+1 < len(ad_lines) else ""
+                    ext_id = proj_num or f"scbo-{date_str}-{i}"
+                    full_desc = f"{name}. {desc}. Cost: {cost}"
+                    cat = classify_project(name, full_desc)
+                    ms = score_match(name, full_desc)
+                    value = None
+                    vals = re.findall(r"[\$]([\d,]+)", cost)
+                    if vals:
+                        try:
+                            value = int(vals[-1].replace(",", ""))
+                        except ValueError:
+                            pass
+                    results.append({
+                        "source_id": "scbo", "external_id": ext_id,
+                        "title": _clean_text(name, 500),
+                        "description": _clean_text(full_desc, 1000),
+                        "location": loc, "value": value,
+                        "category": cat, "match_score": ms,
+                        "status": "Accepting Bids",
+                        "posted_date": _parse_date(date_str),
+                        "agency": _clean_text(agency, 255),
+                        "solicitation_number": proj_num,
+                        "source_url": url,
+                        "raw_data": {"project_number": proj_num, "cost_range": cost},
+                    })
+        except Exception as e:
+            logger.error(f"SCBO error for {date_str}: {e}")
+    seen = set()
+    results = [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]
+    logger.info(f"SCBO: Found {len(results)} construction opportunities")
     return results
 
 

@@ -184,7 +184,7 @@ async def scan_scbo():
     """Scrape SC Business Opportunities - Construction category."""
     results = []
     today = datetime.utcnow()
-    for days_ago in range(7):
+    for days_ago in range(1):
         d = today - timedelta(days=days_ago)
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"

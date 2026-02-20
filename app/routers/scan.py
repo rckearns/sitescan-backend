@@ -1,11 +1,9 @@
-"""Scan endpoints — trigger manual scans and view scan history."""
-
+"""Scan endpoints."""
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-
 from app.models.database import ScanLog, User, get_db
 from app.models.schemas import ScanTriggerResponse, ScanLogOut
 from app.auth import get_current_user
@@ -15,7 +13,6 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 
-
 @router.post("/trigger", response_model=ScanTriggerResponse)
 async def trigger_scan(
     background_tasks: BackgroundTasks,
@@ -23,32 +20,25 @@ async def trigger_scan(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Trigger a manual scan of all or specific sources."""
     source_list = None
     if sources:
         source_list = [s.strip() for s in sources.split(",")]
-
     settings = get_settings()
     sam_key = user.sam_gov_api_key or settings.sam_gov_api_key or ""
     keywords = user.search_keywords or "masonry restoration structural"
     state = user.search_state or "SC"
-
     logs = await run_full_scan(
         sam_api_key=sam_key,
         keywords=keywords,
         state=state,
         sources=source_list,
     )
-
     await process_alerts()
-
     total_found = sum(l.projects_found for l in logs)
     total_new = sum(l.projects_new for l in logs)
-
     return ScanTriggerResponse(
         message=f"Scan complete: {total_found} projects found ({total_new} new)",
     )
-
 
 @router.get("/history", response_model=list[ScanLogOut])
 async def scan_history(
@@ -56,20 +46,14 @@ async def scan_history(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get recent scan history."""
     result = await db.execute(
-        select(ScanLog)
-        .order_by(desc(ScanLog.started_at))
-        .limit(limit)
+        select(ScanLog).order_by(desc(ScanLog.started_at)).limit(limit)
     )
     return result.scalars().all()
 
-
 @router.get("/sources")
 async def list_sources(user: User = Depends(get_current_user)):
-    """List available data sources and their status."""
     from app.services.scanners import ALL_SCANNERS
-
     sources = []
     for source_id, info in ALL_SCANNERS.items():
         sources.append({
@@ -80,5 +64,4 @@ async def list_sources(user: User = Depends(get_current_user)):
                 getattr(user, f"{source_id.replace('-', '_')}_api_key", "")
             ) if info.get("needs_key") else True,
         })
-
     return {"sources": sources}

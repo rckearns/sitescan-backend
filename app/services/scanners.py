@@ -193,54 +193,50 @@ async def scan_scbo():
                 resp = await client.get(url)
                 resp.raise_for_status()
                 html = resp.text
-                clean = re.sub(r"<[^>]+>", "\n", html)
-                ads = re.split(r"(?i)project\s+name\s*:", clean)
-                for i, ad in enumerate(ads[1:], 1):
-                    ad_lines = [l.strip() for l in ad.split("\n") if l.strip()]
-                    if not ad_lines:
+                chunks = html.split("<b>Project Name:</b>")
+                for i, chunk in enumerate(chunks[1:], 1):
+                    def grab(label):
+                        idx = chunk.find("<b>" + label + "</b>")
+                        if idx == -1:
+                            return ""
+                        after = chunk[idx:]
+                        m = re.search(r'margin-right:0\.5%["\x27]?>(.*?)</div>', after, re.DOTALL)
+                        return re.sub(r'<[^>]+>', ' ', m.group(1)).strip() if m else ""
+                    name_m = re.search(r'margin-right:0\.5%["\x27]?>(.*?)</div>', chunk, re.DOTALL)
+                    name = re.sub(r'<[^>]+>', ' ', name_m.group(1)).strip() if name_m else ""
+                    if not name or len(name) < 3:
                         continue
-                    name = ad_lines[0]
-                    full_text = " ".join(ad_lines)
-                    proj_num = ""
-                    loc = "South Carolina"
-                    desc = ""
-                    agency = ""
-                    cost = ""
-                    for j, line in enumerate(ad_lines):
-                        low = line.lower()
-                        if low.startswith("project number"):
-                            proj_num = ad_lines[j+1] if j+1 < len(ad_lines) else ""
-                        elif low.startswith("project location"):
-                            loc = ad_lines[j+1] if j+1 < len(ad_lines) else loc
-                        elif low.startswith("description"):
-                            desc = ad_lines[j+1] if j+1 < len(ad_lines) else ""
-                        elif low.startswith("agency") or low.startswith("owner"):
-                            agency = ad_lines[j+1] if j+1 < len(ad_lines) else ""
-                        elif "cost range" in low:
-                            cost = ad_lines[j+1] if j+1 < len(ad_lines) else ""
+                    proj_num = grab("Project Number:")
+                    location = grab("Project Location:")
+                    agency = grab("Agency/Owner:")
+                    cost_range = grab("Construction Cost Range:")
+                    desc_text = ""
+                    dp = re.search(r'<p>(.*?)</p>', chunk, re.DOTALL)
+                    if dp:
+                        desc_text = re.sub(r'<[^>]+>', ' ', dp.group(1)).strip()
                     ext_id = proj_num or f"scbo-{date_str}-{i}"
-                    full_desc = f"{name}. {desc}. Cost: {cost}"
+                    full_desc = f"{name}. {desc_text}. Cost: {cost_range}".strip()
                     cat = classify_project(name, full_desc)
                     ms = score_match(name, full_desc)
                     value = None
-                    vals = re.findall(r"[\$]([\d,]+)", cost)
-                    if vals:
+                    val_m = re.findall(r'\$([\d,]+)', cost_range)
+                    if val_m:
                         try:
-                            value = int(vals[-1].replace(",", ""))
-                        except ValueError:
+                            value = int(val_m[-1].replace(',', ''))
+                        except (ValueError, IndexError):
                             pass
                     results.append({
                         "source_id": "scbo", "external_id": ext_id,
                         "title": _clean_text(name, 500),
                         "description": _clean_text(full_desc, 1000),
-                        "location": loc, "value": value,
-                        "category": cat, "match_score": ms,
+                        "location": location or "South Carolina",
+                        "value": value, "category": cat, "match_score": ms,
                         "status": "Accepting Bids",
                         "posted_date": _parse_date(date_str),
                         "agency": _clean_text(agency, 255),
                         "solicitation_number": proj_num,
                         "source_url": url,
-                        "raw_data": {"project_number": proj_num, "cost_range": cost},
+                        "raw_data": {"project_number": proj_num, "cost_range": cost_range},
                     })
         except Exception as e:
             logger.error(f"SCBO error for {date_str}: {e}")
@@ -248,7 +244,6 @@ async def scan_scbo():
     results = [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]
     logger.info(f"SCBO: Found {len(results)} construction opportunities")
     return results
-
 
 async def scan_charleston_bids():
     results = []

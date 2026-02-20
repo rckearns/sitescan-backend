@@ -55,7 +55,7 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
         for naics in CONSTRUCTION_NAICS:
             params["ncode"] = naics
             try:
-                resp = await client.get("https://api.sam.gov/opportunities/v2/search", params=params)
+                resp = await client.get("https://api.sam.gov/prod/opportunities/v2/search", params=params)
                 resp.raise_for_status()
                 data = resp.json()
                 for opp in data.get("opportunitiesData", []):

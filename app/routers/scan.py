@@ -31,7 +31,9 @@ async def trigger_scan(
         source_list = [s.strip() for s in sources.split(",")]
     
     # Get user's SAM.gov key (falls back to system key)
-    sam_key = user.sam_gov_api_key or ""
+
+from app.config import get_settings    
+sam_key = user.sam_gov_api_key or get_settings().sam_gov_api_key or ""
     keywords = user.search_keywords or "masonry restoration structural"
     state = user.search_state or "SC"
     

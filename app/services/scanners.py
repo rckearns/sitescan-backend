@@ -189,7 +189,7 @@ async def scan_scbo():
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.5"}) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 html = resp.text

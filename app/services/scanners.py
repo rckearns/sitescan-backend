@@ -51,9 +51,9 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     if keywords: params["title"] = keywords
 
     results = []
+    params["ncode"] = ",".join(CONSTRUCTION_NAICS)
     async with httpx.AsyncClient(timeout=30.0) as client:
-        for naics in CONSTRUCTION_NAICS:
-            params["ncode"] = naics
+        if True:
             try:
                 resp = await client.get("https://api.sam.gov/prod/opportunities/v2/search", params=params)
                 resp.raise_for_status()
@@ -76,12 +76,12 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
                         "deadline": _parse_date(opp.get("responseDeadLine")),
                         "agency": _clean_text(opp.get("fullParentPathName", ""), 255),
                         "solicitation_number": opp.get("solicitationNumber", ""),
-                        "naics_code": naics,
+                        "naics_code": ",".join(CONSTRUCTION_NAICS),
                         "source_url": f"https://sam.gov/opp/{opp.get('noticeId','')}/view",
                         "raw_data": opp,
                     })
             except Exception as e:
-                logger.error(f"SAM.gov NAICS {naics}: {e}")
+                logger.error(f"SAM.gov error: {e}")
 
     seen = set()
     return [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]

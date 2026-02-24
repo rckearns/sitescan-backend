@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     )
     constructconnect_api_key: str = ""
     
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": None}
 
 
 @lru_cache

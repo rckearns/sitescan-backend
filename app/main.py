@@ -100,16 +100,7 @@ app.include_router(scan_router, prefix="/api/v1")
 
 @app.get("/health")
 async def health():
-    import os
-    db = os.environ.get("DATABASE_URL", "NOT_SET")
-    return {
-        "status": "ok",
-        "service": "sitescan-api",
-        "version": "1.0.0",
-        "DATABASE_URL_SET": db != "NOT_SET",
-        "db_type": "postgres" if "postgres" in db else "sqlite",
-        "db_prefix": db[:30] if db != "NOT_SET" else "NOT_SET",
-    }
+    return {"status": "ok", "service": "sitescan-api", "version": "1.0.0"}
 
 
 @app.get("/")

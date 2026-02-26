@@ -46,7 +46,13 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     
     # Initialize database
-    logger.info("Initializing database...")
+    import os
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_PRIVATE_URL") or os.environ.get("POSTGRES_URL") or ""
+    if db_url.startswith("postgres"):
+        scheme = db_url.split("@")[0].split("://")[0] if "@" in db_url else db_url[:30]
+        logger.info(f"Database: postgresql (host hidden) [{scheme}]")
+    else:
+        logger.info("Database: sqlite (no DATABASE_URL found — ephemeral!)")
     await init_db()
     logger.info("Database ready")
     

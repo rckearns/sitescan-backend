@@ -147,8 +147,17 @@ class ScanLog(Base):
 
 def get_engine():
     import os
-    db_url = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./sitescan.db")
-    if db_url.startswith("postgresql://"):
+    db_url = (
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("DATABASE_PRIVATE_URL")
+        or os.environ.get("POSTGRES_URL")
+        or "sqlite+aiosqlite:///./sitescan.db"
+    )
+    # Railway (and Heroku) may provide postgres:// or postgresql:// — both need
+    # the asyncpg driver prefix for SQLAlchemy async.
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     settings = get_settings()
     return create_async_engine(

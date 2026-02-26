@@ -38,6 +38,7 @@ async def trigger_scan(
     total_new = sum(l.projects_new for l in logs)
     return ScanTriggerResponse(
         message=f"Scan complete: {total_found} projects found ({total_new} new)",
+        scan_id=logs[0].id if logs else None,
     )
 
 @router.get("/history", response_model=list[ScanLogOut])

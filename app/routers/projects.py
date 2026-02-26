@@ -1,17 +1,19 @@
 """Projects endpoints — list, filter, search, save, and manage opportunities."""
 
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, and_, or_, desc, asc
+from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 from typing import Optional
 
-from app.models.database import Project, SavedProject, get_db, User
+from app.models.database import Project, SavedProject, ScanLog, get_db, User
 from app.models.schemas import (
     ProjectOut, ProjectListResponse, SaveProjectRequest,
     SavedProjectOut,
 )
 from app.auth import get_current_user
+from app.services.scoring import score_against_profile
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -20,7 +22,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 async def list_projects(
     categories: Optional[str] = Query(None, description="Comma-separated category IDs"),
     sources: Optional[str] = Query(None, description="Comma-separated source IDs"),
-    min_match: int = Query(0, ge=0, le=99),
+    min_match: int = Query(0, ge=0, le=100),
     min_value: Optional[float] = Query(None),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None, description="Keyword search in title and description"),
@@ -32,33 +34,31 @@ async def list_projects(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List projects with filtering, sorting, and pagination."""
+    """List projects with filtering, sorting, and pagination.
+
+    Match scores are computed dynamically against the requesting user's
+    saved criteria profile — not from a stored keyword score.
+    """
     query = select(Project)
-    count_query = select(func.count(Project.id))
-    
-    # Filters
     conditions = []
-    
+
     if active_only:
         conditions.append(Project.is_active == True)
-    
+
     if categories:
         cat_list = [c.strip() for c in categories.split(",")]
         conditions.append(Project.category.in_(cat_list))
-    
+
     if sources:
         src_list = [s.strip() for s in sources.split(",")]
         conditions.append(Project.source_id.in_(src_list))
-    
-    if min_match > 0:
-        conditions.append(Project.match_score >= min_match)
-    
+
     if min_value is not None:
         conditions.append(Project.value >= min_value)
-    
+
     if status:
         conditions.append(Project.status == status)
-    
+
     if search:
         search_term = f"%{search}%"
         conditions.append(
@@ -69,35 +69,48 @@ async def list_projects(
                 Project.location.ilike(search_term),
             )
         )
-    
+
     if conditions:
         query = query.where(and_(*conditions))
-        count_query = count_query.where(and_(*conditions))
-    
-    # Sorting
-    sort_col = getattr(Project, sort_by, Project.match_score)
-    if sort_by == "value":
-        # Put nulls last
-        query = query.order_by(
-            Project.value.is_(None).asc() if sort_dir == "desc" else Project.value.is_(None).desc(),
-            desc(sort_col) if sort_dir == "desc" else asc(sort_col),
-        )
-    else:
-        query = query.order_by(desc(sort_col) if sort_dir == "desc" else asc(sort_col))
-    
-    # Count
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
-    
-    # Paginate
-    query = query.offset(offset).limit(limit)
+
+    # Fetch all matching rows — scoring and min_match happen in Python
     result = await db.execute(query)
-    projects = result.scalars().all()
-    
-    return ProjectListResponse(
-        total=total,
-        projects=[ProjectOut.model_validate(p) for p in projects],
-    )
+    all_projects = result.scalars().all()
+
+    # Compute dynamic scores against user's profile criteria
+    scored = [(p, score_against_profile(p, user)) for p in all_projects]
+
+    # Apply min_match filter
+    if min_match > 0:
+        scored = [(p, s) for p, s in scored if s >= min_match]
+
+    # Sort
+    reverse = sort_dir == "desc"
+    if sort_by == "match_score":
+        scored.sort(key=lambda x: x[1], reverse=reverse)
+    elif sort_by == "value":
+        scored.sort(
+            key=lambda x: (x[0].value is None, x[0].value or 0),
+            reverse=reverse,
+        )
+    elif sort_by == "posted_date":
+        scored.sort(
+            key=lambda x: (x[0].posted_date is None, x[0].posted_date or datetime.min),
+            reverse=reverse,
+        )
+    elif sort_by == "first_seen":
+        scored.sort(key=lambda x: x[0].first_seen, reverse=reverse)
+
+    total = len(scored)
+    page = scored[offset: offset + limit]
+
+    projects_out = []
+    for p, score in page:
+        p_out = ProjectOut.model_validate(p)
+        p_out.match_score = score
+        projects_out.append(p_out)
+
+    return ProjectListResponse(total=total, projects=projects_out)
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -111,7 +124,9 @@ async def get_project(
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    p_out = ProjectOut.model_validate(project)
+    p_out.match_score = score_against_profile(project, user)
+    return p_out
 
 
 @router.get("/stats/summary")
@@ -119,42 +134,42 @@ async def project_stats(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get summary statistics for the project pipeline."""
-    result = await db.execute(
-        select(
-            func.count(Project.id).label("total"),
-            func.sum(Project.value).label("total_value"),
-            func.avg(Project.match_score).label("avg_match"),
-            func.count(Project.id).filter(Project.match_score >= 80).label("high_match"),
-        ).where(Project.is_active == True)
+    """Get summary statistics computed against the user's scoring criteria."""
+    # Fetch all active projects and score dynamically
+    result = await db.execute(select(Project).where(Project.is_active == True))
+    projects = result.scalars().all()
+
+    scores = [score_against_profile(p, user) for p in projects]
+    total = len(projects)
+    total_value = sum(p.value for p in projects if p.value)
+    avg_match = round(sum(scores) / total, 1) if total else 0
+    high_match = sum(1 for s in scores if s >= 80)
+
+    by_source = {}
+    for p in projects:
+        by_source[p.source_id] = by_source.get(p.source_id, 0) + 1
+
+    by_category = {}
+    for p in projects:
+        by_category[p.category] = by_category.get(p.category, 0) + 1
+
+    # Last successful scan timestamp
+    last_scan_result = await db.execute(
+        select(ScanLog)
+        .where(ScanLog.status == "success")
+        .order_by(desc(ScanLog.started_at))
+        .limit(1)
     )
-    row = result.one()
-    
-    # Count by source
-    source_result = await db.execute(
-        select(
-            Project.source_id,
-            func.count(Project.id).label("count"),
-        ).where(Project.is_active == True).group_by(Project.source_id)
-    )
-    by_source = {r[0]: r[1] for r in source_result.all()}
-    
-    # Count by category
-    cat_result = await db.execute(
-        select(
-            Project.category,
-            func.count(Project.id).label("count"),
-        ).where(Project.is_active == True).group_by(Project.category)
-    )
-    by_category = {r[0]: r[1] for r in cat_result.all()}
-    
+    last_scan = last_scan_result.scalar_one_or_none()
+
     return {
-        "total_projects": row.total or 0,
-        "total_pipeline_value": row.total_value or 0,
-        "avg_match_score": round(row.avg_match or 0, 1),
-        "high_match_count": row.high_match or 0,
+        "total_projects": total,
+        "total_pipeline_value": total_value,
+        "avg_match_score": avg_match,
+        "high_match_count": high_match,
         "by_source": by_source,
         "by_category": by_category,
+        "last_scan_at": last_scan.started_at.isoformat() if last_scan else None,
     }
 
 
@@ -167,13 +182,11 @@ async def save_project(
     user: User = Depends(get_current_user),
 ):
     """Save/bookmark a project."""
-    # Check project exists
     result = await db.execute(select(Project).where(Project.id == data.project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Check if already saved
+
     existing = await db.execute(
         select(SavedProject).where(
             SavedProject.user_id == user.id,
@@ -182,7 +195,7 @@ async def save_project(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Project already saved")
-    
+
     saved = SavedProject(
         user_id=user.id,
         project_id=data.project_id,
@@ -191,8 +204,7 @@ async def save_project(
     )
     db.add(saved)
     await db.flush()
-    
-    # Reload with project relationship
+
     result = await db.execute(
         select(SavedProject)
         .options(joinedload(SavedProject.project))
@@ -232,6 +244,6 @@ async def unsave_project(
     saved = result.scalar_one_or_none()
     if not saved:
         raise HTTPException(status_code=404, detail="Saved project not found")
-    
+
     await db.delete(saved)
     return {"message": "Project removed from saved list"}

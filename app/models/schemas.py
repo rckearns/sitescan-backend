@@ -36,6 +36,11 @@ class UserProfile(BaseModel):
     search_radius_miles: int
     enabled_categories: list
     enabled_sources: list
+    # Match scoring criteria
+    criteria_min_value: Optional[float] = None
+    criteria_categories: list = []
+    criteria_statuses: list = []
+    criteria_sources: list = []
     created_at: datetime
 
     class Config:
@@ -56,6 +61,11 @@ class UserUpdate(BaseModel):
     enabled_sources: Optional[list] = None
     sam_gov_api_key: Optional[str] = None
     constructconnect_api_key: Optional[str] = None
+    # Match scoring criteria
+    criteria_min_value: Optional[float] = None
+    criteria_categories: Optional[list] = None
+    criteria_statuses: Optional[list] = None
+    criteria_sources: Optional[list] = None
 
 
 # ─── PROJECTS ────────────────────────────────────────────────────────────────

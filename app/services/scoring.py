@@ -1,8 +1,14 @@
 """Project classification and relevance scoring engine.
 
 Classifies projects into categories and computes a match score
-based on keyword relevance to masonry, historic restoration,
-and structural work profiles.
+based on how well each project satisfies the user's saved criteria.
+
+Scoring model:
+  - User defines criteria: min value, preferred categories, statuses, sources
+  - Each active criterion is worth an equal share of 100 points
+  - A project that meets ALL criteria scores 100%
+  - A project meeting none scores 0%
+  - If no criteria are set, projects score 50 (neutral)
 """
 
 import re
@@ -46,122 +52,58 @@ CATEGORY_PATTERNS = [
 def classify_project(title: str, description: str = "") -> str:
     """Classify a project into a category based on title and description."""
     text = f"{title} {description}"
-    
-    # Score each category
+
     scores = {}
     for cat_id, pattern in CATEGORY_PATTERNS:
         matches = pattern.findall(text)
         scores[cat_id] = len(matches)
-    
-    # Return highest-scoring category, default to residential
+
     if not scores or max(scores.values()) == 0:
         return "residential"
     return max(scores, key=scores.get)
 
 
-# ─── MATCH SCORING ──────────────────────────────────────────────────────────
+# ─── PROFILE-BASED MATCH SCORING ────────────────────────────────────────────
 
-# Weighted keyword groups — higher weight = more relevant to target profile
-SCORE_GROUPS = [
-    # Core specialties (high value)
-    (18, re.compile(
-        r"historic\s*(masonry|brick|restoration|facade)|"
-        r"lime[\s-]*mortar|heritage\s*mortar|repoint|tuckpoint|"
-        r"parexlanko|sikamur|european\s*mortar|specialty\s*mortar",
-        re.IGNORECASE,
-    )),
-    # Primary trades
-    (14, re.compile(
-        r"masonry|brick\s*(repair|replac|restor)|stone\s*(repair|restor)|"
-        r"stucco\s*(repair|remov|replac)|mortar\s*joint|facade\s*restor",
-        re.IGNORECASE,
-    )),
-    (12, re.compile(
-        r"structur\s*(reinforc|repair|modif)|load[\s-]*bear|"
-        r"foundation\s*(repair|reinforc|underpin)|"
-        r"steel\s*beam|shoring|seismic\s*brac",
-        re.IGNORECASE,
-    )),
-    (10, re.compile(
-        r"historic|preservation|restoration|heritage|landmark|"
-        r"national\s*register|adaptive\s*reuse",
-        re.IGNORECASE,
-    )),
-    # Location bonuses
-    (8, re.compile(
-        r"charleston|mt\.?\s*pleasant|james\s*island|summerville|"
-        r"north\s*charleston|west\s*ashley|johns?\s*island|"
-        r"folly\s*beach|sullivan|daniel\s*island|goose\s*creek",
-        re.IGNORECASE,
-    )),
-    # Adjacent trades
-    (6, re.compile(
-        r"concrete|block|retaining\s*wall|waterproof|"
-        r"envelope|exterior\s*repair|caulk|sealant|flashing",
-        re.IGNORECASE,
-    )),
-    # Environmental/code factors
-    (4, re.compile(
-        r"hurricane|wind\s*uplift|coastal|flood|moisture|"
-        r"bar\s*review|board\s*of\s*architectural|"
-        r"building\s*code|ibc|fema",
-        re.IGNORECASE,
-    )),
-    # General construction
-    (2, re.compile(
-        r"repair|rehabilitat|renovat|restor|abatement|demolition|"
-        r"construction|building|renovation",
-        re.IGNORECASE,
-    )),
-]
+def score_against_profile(project, user) -> int:
+    """Score a project 0–100 based on how many of the user's criteria it meets.
 
-# Negative signals (reduce score)
-NEGATIVE_PATTERNS = re.compile(
-    r"software|IT\s*service|janitorial|landscap|paving|asphalt|"
-    r"electrical\s*only|plumbing\s*only|hvac\s*only|roofing\s*only|"
-    r"painting\s*only|carpet|flooring\s*only",
-    re.IGNORECASE,
-)
-
-
-def score_match(title: str, description: str = "", user_keywords: Optional[str] = None) -> int:
-    """Compute a 0-99 relevance match score for a project.
-    
-    Higher scores indicate stronger alignment with the user's
-    masonry/restoration/structural profile.
+    Each criterion the user has configured counts equally.
+    Meeting all criteria → 100. Meeting none → 0.
+    No criteria configured → neutral score of 50.
     """
-    text = f"{title} {description}"
-    score = 35  # baseline
-    
-    # Apply weighted keyword groups
-    for weight, pattern in SCORE_GROUPS:
-        matches = pattern.findall(text)
-        if matches:
-            # Diminishing returns for multiple matches in same group
-            score += weight + min(len(matches) - 1, 3) * (weight // 4)
-    
-    # User custom keywords boost
-    if user_keywords:
-        for kw in user_keywords.split():
-            if kw.strip() and re.search(re.escape(kw.strip()), text, re.IGNORECASE):
-                score += 3
-    
-    # Negative signals penalty
-    neg_matches = NEGATIVE_PATTERNS.findall(text)
-    score -= len(neg_matches) * 10
-    
-    # Value-based boost (higher value projects get slight bump)
-    # This is handled externally since we don't have value here
-    
-    return max(1, min(score, 99))
+    criteria_total = 0
+    criteria_met = 0
 
+    # ── Value criterion ──────────────────────────────────────────────────────
+    min_val = getattr(user, "criteria_min_value", None)
+    if min_val:
+        criteria_total += 1
+        if project.value and project.value >= min_val:
+            criteria_met += 1
 
-def score_with_value_boost(base_score: int, value: Optional[float]) -> int:
-    """Apply a small boost for higher-value projects."""
-    if not value:
-        return base_score
-    if value >= 500_000:
-        return min(base_score + 4, 99)
-    if value >= 100_000:
-        return min(base_score + 2, 99)
-    return base_score
+    # ── Category criterion ───────────────────────────────────────────────────
+    cat_criteria = getattr(user, "criteria_categories", None) or []
+    if cat_criteria:
+        criteria_total += 1
+        if project.category in cat_criteria:
+            criteria_met += 1
+
+    # ── Status criterion ─────────────────────────────────────────────────────
+    status_criteria = getattr(user, "criteria_statuses", None) or []
+    if status_criteria:
+        criteria_total += 1
+        if project.status in status_criteria:
+            criteria_met += 1
+
+    # ── Source criterion ─────────────────────────────────────────────────────
+    source_criteria = getattr(user, "criteria_sources", None) or []
+    if source_criteria:
+        criteria_total += 1
+        if project.source_id in source_criteria:
+            criteria_met += 1
+
+    if criteria_total == 0:
+        return 50  # no criteria set — neutral
+
+    return round((criteria_met / criteria_total) * 100)

@@ -3,7 +3,7 @@
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey,
-    Index, UniqueConstraint, JSON,
+    Index, UniqueConstraint, JSON, text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -74,7 +74,7 @@ class Project(Base):
     # Source-specific metadata
     agency = Column(String(255), default="")
     solicitation_number = Column(String(100), default="")
-    naics_code = Column(String(20), default="")
+    naics_code = Column(Text, default="")             # can be comma-separated list
     permit_number = Column(String(100), default="")
     contractor = Column(String(255), default="")
     source_url = Column(String(500), default="")
@@ -179,10 +179,14 @@ def get_session_factory():
 
 
 async def init_db():
-    """Create all tables."""
+    """Create all tables and run lightweight column migrations."""
     get_session_factory()  # ensures _engine is initialized
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Widen naics_code from VARCHAR(20) → TEXT (safe no-op if already TEXT)
+        await conn.execute(text(
+            "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT"
+        ))
 
 
 async def get_db():

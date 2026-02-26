@@ -166,15 +166,22 @@ def get_engine():
     )
 
 
+_engine = None
+_session_factory = None
+
+
 def get_session_factory():
-    engine = get_engine()
-    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    global _engine, _session_factory
+    if _session_factory is None:
+        _engine = get_engine()
+        _session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    return _session_factory
 
 
 async def init_db():
     """Create all tables."""
-    engine = get_engine()
-    async with engine.begin() as conn:
+    get_session_factory()  # ensures _engine is initialized
+    async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 

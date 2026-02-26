@@ -20,56 +20,57 @@ logger = logging.getLogger("sitescan.orchestrator")
 async def upsert_projects(session: AsyncSession, projects: list[dict]) -> tuple[int, int]:
     """Insert new projects or update existing ones. Returns (total, new_count)."""
     new_count = 0
-    
-    for proj in projects:
-        # Check if exists
-        result = await session.execute(
-            select(Project).where(
-                Project.source_id == proj["source_id"],
-                Project.external_id == proj["external_id"],
+
+    async with session.no_autoflush:
+        for proj in projects:
+            # Check if exists
+            result = await session.execute(
+                select(Project).where(
+                    Project.source_id == proj["source_id"],
+                    Project.external_id == proj["external_id"],
+                )
             )
-        )
-        existing = result.scalar_one_or_none()
-        
-        if existing:
-            # Update last_seen and any changed fields
-            existing.last_seen = datetime.utcnow()
-            existing.title = proj.get("title", existing.title)
-            existing.description = proj.get("description", existing.description)
-            existing.status = proj.get("status", existing.status)
-            existing.match_score = proj.get("match_score", existing.match_score)
-            existing.value = proj.get("value", existing.value)
-            existing.is_active = True
-            if proj.get("deadline"):
-                existing.deadline = proj["deadline"]
-        else:
-            # Insert new
-            new_proj = Project(
-                source_id=proj.get("source_id", ""),
-                external_id=proj.get("external_id", ""),
-                title=proj.get("title", ""),
-                description=proj.get("description", ""),
-                location=proj.get("location", ""),
-                address=proj.get("address", ""),
-                latitude=proj.get("latitude"),
-                longitude=proj.get("longitude"),
-                value=proj.get("value"),
-                category=proj.get("category", "residential"),
-                match_score=proj.get("match_score", 50),
-                status=proj.get("status", "Open"),
-                posted_date=proj.get("posted_date"),
-                deadline=proj.get("deadline"),
-                agency=proj.get("agency", ""),
-                solicitation_number=proj.get("solicitation_number", ""),
-                naics_code=proj.get("naics_code", ""),
-                permit_number=proj.get("permit_number", ""),
-                contractor=proj.get("contractor", ""),
-                source_url=proj.get("source_url", ""),
-                raw_data=proj.get("raw_data"),
-            )
-            session.add(new_proj)
-            new_count += 1
-    
+            existing = result.scalar_one_or_none()
+
+            if existing:
+                # Update last_seen and any changed fields
+                existing.last_seen = datetime.utcnow()
+                existing.title = proj.get("title", existing.title)
+                existing.description = proj.get("description", existing.description)
+                existing.status = proj.get("status", existing.status)
+                existing.match_score = proj.get("match_score", existing.match_score)
+                existing.value = proj.get("value", existing.value)
+                existing.is_active = True
+                if proj.get("deadline"):
+                    existing.deadline = proj["deadline"]
+            else:
+                # Insert new
+                new_proj = Project(
+                    source_id=proj.get("source_id", ""),
+                    external_id=proj.get("external_id", ""),
+                    title=proj.get("title", ""),
+                    description=proj.get("description", ""),
+                    location=proj.get("location", ""),
+                    address=proj.get("address", ""),
+                    latitude=proj.get("latitude"),
+                    longitude=proj.get("longitude"),
+                    value=proj.get("value"),
+                    category=proj.get("category", "residential"),
+                    match_score=proj.get("match_score", 50),
+                    status=proj.get("status", "Open"),
+                    posted_date=proj.get("posted_date"),
+                    deadline=proj.get("deadline"),
+                    agency=proj.get("agency", ""),
+                    solicitation_number=proj.get("solicitation_number", ""),
+                    naics_code=proj.get("naics_code", ""),
+                    permit_number=proj.get("permit_number", ""),
+                    contractor=proj.get("contractor", ""),
+                    source_url=proj.get("source_url", ""),
+                    raw_data=proj.get("raw_data"),
+                )
+                session.add(new_proj)
+                new_count += 1
+
     await session.flush()
     return len(projects), new_count
 

@@ -159,6 +159,8 @@ async def run_full_scan(
     This is the main entry point called by both the scheduler
     and the manual scan API endpoint.
     """
+    import os
+    logger.info(f"DB URL in run_full_scan: {os.environ.get('DATABASE_URL', 'NOT SET')[:30]}")
     session_factory = get_session_factory()
     source_ids = sources or list(ALL_SCANNERS.keys())
     logs = []

@@ -6,7 +6,6 @@ from typing import Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.models.database import Project, ScanLog, User, get_session_factory
 from app.services.scanners import (
@@ -159,9 +158,6 @@ async def run_full_scan(
     This is the main entry point called by both the scheduler
     and the manual scan API endpoint.
     """
-    import os
-    db_vars = {k:v[:30] for k,v in os.environ.items() if "database" in k.lower() or "postgres" in k.lower() or "pg" in k.lower()}
-    logger.info(f"DB env vars: {db_vars}")
     session_factory = get_session_factory()
     source_ids = sources or list(ALL_SCANNERS.keys())
     logs = []

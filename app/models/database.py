@@ -35,6 +35,12 @@ class User(Base):
     search_radius_miles = Column(Integer, default=25)
     enabled_categories = Column(JSON, default=list)  # list of category IDs
     enabled_sources = Column(JSON, default=list)      # list of source IDs
+
+    # Match scoring criteria — projects meeting ALL set criteria score 100%
+    criteria_min_value = Column(Float, nullable=True)      # e.g. 1000000
+    criteria_categories = Column(JSON, default=list)       # e.g. ["commercial", "government"]
+    criteria_statuses = Column(JSON, default=list)         # e.g. ["Open", "Accepting Bids"]
+    criteria_sources = Column(JSON, default=list)          # e.g. ["sam-gov", "scbo"]
     
     # API keys (encrypted in prod — stored plain for MVP)
     sam_gov_api_key = Column(String(255), default="")
@@ -187,6 +193,16 @@ async def init_db():
         await conn.execute(text(
             "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT"
         ))
+        # Add scoring criteria columns (safe no-op if already exist)
+        for col, typedef in [
+            ("criteria_min_value", "FLOAT"),
+            ("criteria_categories", "JSON"),
+            ("criteria_statuses", "JSON"),
+            ("criteria_sources", "JSON"),
+        ]:
+            await conn.execute(text(
+                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}"
+            ))
 
 
 async def get_db():

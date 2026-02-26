@@ -42,16 +42,15 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     today = datetime.utcnow()
     from_date = today - timedelta(days=days_back)
     params = {
-        "api_key": api_key, "limit": "50",
+        "api_key": api_key, "limit": "100",
         "postedFrom": from_date.strftime("%m/%d/%Y"),
         "postedTo": today.strftime("%m/%d/%Y"),
         "ptype": "o,p,k",
+        "title": keywords or "building construction",
     }
-    if state: params["state"] = state
-    if keywords: params["title"] = keywords
+    if state: params["place_of_performance_state"] = state
 
     results = []
-    params["ncode"] = ",".join(CONSTRUCTION_NAICS)
     async with httpx.AsyncClient(timeout=30.0) as client:
         if True:
             try:

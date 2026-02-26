@@ -146,9 +146,13 @@ class ScanLog(Base):
 # ─── DATABASE ENGINE ─────────────────────────────────────────────────────────
 
 def get_engine():
+    import os
+    db_url = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./sitescan.db")
+    if db_url.startswith("postgresql://"):
+        db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     settings = get_settings()
     return create_async_engine(
-        settings.database_url,
+        db_url,
         echo=settings.app_env == "development",
     )
 

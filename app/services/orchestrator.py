@@ -91,60 +91,62 @@ async def run_source_scan(
         status="running",
     )
     session.add(scan_log)
-    await session.flush()
-    
+    await session.flush()  # persist scan_log in outer transaction
+
     try:
-        projects = []
-        
-        if source_id == "sam-gov":
-            key = sam_api_key or settings.sam_gov_api_key
-            # Check cache — if we already scanned SAM today, skip the API call
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            cached = await session.execute(
-                select(Project).where(
-                    Project.source_id == "sam-gov",
-                    Project.last_seen >= today_start,
-                ).limit(1)
-            )
-            if cached.scalar_one_or_none():
-                logger.info("SAM.gov: using cached results from today")
-                all_cached = await session.execute(
-                    select(Project).where(Project.source_id == "sam-gov", Project.is_active == True)
+        # Use a savepoint so a DB error in one source doesn't poison the session
+        async with session.begin_nested():
+            projects = []
+
+            if source_id == "sam-gov":
+                key = sam_api_key or settings.sam_gov_api_key
+                # Check cache — if we already scanned SAM today, skip the API call
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                cached = await session.execute(
+                    select(Project).where(
+                        Project.source_id == "sam-gov",
+                        Project.last_seen >= today_start,
+                    ).limit(1)
                 )
-                projects = [{"source_id": "sam-gov", "external_id": p.external_id, "title": p.title,
-                             "description": p.description, "location": p.location, "value": p.value,
-                             "category": p.category, "match_score": p.match_score, "status": p.status,
-                             "posted_date": p.posted_date, "deadline": p.deadline, "agency": p.agency,
-                             "solicitation_number": p.solicitation_number, "naics_code": p.naics_code,
-                             "source_url": p.source_url, "raw_data": p.raw_data}
-                            for p in all_cached.scalars().all()]
-            else:
-                projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
-            
-        elif source_id == "charleston-permits":
-            projects = await scan_charleston_permits(arcgis_url=settings.charleston_arcgis_url)
-            
-        elif source_id == "scbo":
-            projects = await scan_scbo()
-            
-        elif source_id == "charleston-city-bids":
-            projects = await scan_charleston_bids()
-        
-        total, new_count = await upsert_projects(session, projects)
-        
-        scan_log.finished_at = datetime.utcnow()
-        scan_log.status = "success"
-        scan_log.projects_found = total
-        scan_log.projects_new = new_count
-        
-        logger.info(f"Scan {source_id}: {total} found, {new_count} new")
-        
+                if cached.scalar_one_or_none():
+                    logger.info("SAM.gov: using cached results from today")
+                    all_cached = await session.execute(
+                        select(Project).where(Project.source_id == "sam-gov", Project.is_active == True)
+                    )
+                    projects = [{"source_id": "sam-gov", "external_id": p.external_id, "title": p.title,
+                                 "description": p.description, "location": p.location, "value": p.value,
+                                 "category": p.category, "match_score": p.match_score, "status": p.status,
+                                 "posted_date": p.posted_date, "deadline": p.deadline, "agency": p.agency,
+                                 "solicitation_number": p.solicitation_number, "naics_code": p.naics_code,
+                                 "source_url": p.source_url, "raw_data": p.raw_data}
+                                for p in all_cached.scalars().all()]
+                else:
+                    projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
+
+            elif source_id == "charleston-permits":
+                projects = await scan_charleston_permits(arcgis_url=settings.charleston_arcgis_url)
+
+            elif source_id == "scbo":
+                projects = await scan_scbo()
+
+            elif source_id == "charleston-city-bids":
+                projects = await scan_charleston_bids()
+
+            total, new_count = await upsert_projects(session, projects)
+
+            scan_log.finished_at = datetime.utcnow()
+            scan_log.status = "success"
+            scan_log.projects_found = total
+            scan_log.projects_new = new_count
+            logger.info(f"Scan {source_id}: {total} found, {new_count} new")
+
     except Exception as e:
+        # Savepoint rolled back — outer transaction (scan_log) is still valid
         scan_log.finished_at = datetime.utcnow()
         scan_log.status = "error"
         scan_log.error_message = str(e)[:500]
         logger.error(f"Scan {source_id} failed: {e}")
-    
+
     return scan_log
 
 

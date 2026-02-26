@@ -42,45 +42,50 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     today = datetime.utcnow()
     from_date = today - timedelta(days=days_back)
     params = {
-        "api_key": api_key, "limit": "100",
+        "api_key": api_key,
+        "limit": 100,
         "postedFrom": from_date.strftime("%m/%d/%Y"),
         "postedTo": today.strftime("%m/%d/%Y"),
         "ptype": "o,p,k",
-        "title": keywords or "building construction",
+        "q": keywords or "building construction",
     }
-    if state: params["place_of_performance_state"] = state
+    if state:
+        params["state"] = state
 
     results = []
     async with httpx.AsyncClient(timeout=30.0) as client:
-        if True:
-            try:
-                resp = await client.get("https://api.sam.gov/prod/opportunities/v2/search", params=params)
+        try:
+            resp = await client.get("https://api.sam.gov/opportunities/v2/search", params=params)
+            if not resp.is_success:
+                logger.error(f"SAM.gov HTTP {resp.status_code}: {resp.text[:500]}")
                 resp.raise_for_status()
-                data = resp.json()
-                for opp in data.get("opportunitiesData", []):
-                    title = _clean_text(opp.get("title", ""), 500)
-                    desc = ""
-                    if isinstance(opp.get("description"), dict):
-                        desc = _clean_text(opp["description"].get("body", ""))
-                    elif isinstance(opp.get("description"), str):
-                        desc = _clean_text(opp["description"])
-                    cat = classify_project(title, desc)
-                    ms = score_with_value_boost(score_match(title, desc, keywords), None)
-                    results.append({
-                        "source_id": "sam-gov", "external_id": str(opp.get("noticeId", "")),
-                        "title": title, "description": desc, "location": state,
-                        "value": None, "category": cat, "match_score": ms,
-                        "status": "Open" if opp.get("active") == "Yes" else "Closed",
-                        "posted_date": _parse_date(opp.get("postedDate")),
-                        "deadline": _parse_date(opp.get("responseDeadLine")),
-                        "agency": _clean_text(opp.get("fullParentPathName", ""), 255),
-                        "solicitation_number": opp.get("solicitationNumber", ""),
-                        "naics_code": ",".join(CONSTRUCTION_NAICS),
-                        "source_url": f"https://sam.gov/opp/{opp.get('noticeId','')}/view",
-                        "raw_data": opp,
-                    })
-            except Exception as e:
-                logger.error(f"SAM.gov error: {e}")
+            data = resp.json()
+            total = data.get("totalRecords", "?")
+            logger.info(f"SAM.gov: {total} total records returned")
+            for opp in data.get("opportunitiesData", []):
+                title = _clean_text(opp.get("title", ""), 500)
+                desc = ""
+                if isinstance(opp.get("description"), dict):
+                    desc = _clean_text(opp["description"].get("body", ""))
+                elif isinstance(opp.get("description"), str):
+                    desc = _clean_text(opp["description"])
+                cat = classify_project(title, desc)
+                ms = score_with_value_boost(score_match(title, desc, keywords), None)
+                results.append({
+                    "source_id": "sam-gov", "external_id": str(opp.get("noticeId", "")),
+                    "title": title, "description": desc, "location": state,
+                    "value": None, "category": cat, "match_score": ms,
+                    "status": "Open" if opp.get("active") == "Yes" else "Closed",
+                    "posted_date": _parse_date(opp.get("postedDate")),
+                    "deadline": _parse_date(opp.get("responseDeadLine")),
+                    "agency": _clean_text(opp.get("fullParentPathName", ""), 255),
+                    "solicitation_number": opp.get("solicitationNumber", ""),
+                    "naics_code": ",".join(CONSTRUCTION_NAICS),
+                    "source_url": f"https://sam.gov/opp/{opp.get('noticeId','')}/view",
+                    "raw_data": opp,
+                })
+        except Exception as e:
+            logger.error(f"SAM.gov error: {e}")
 
     seen = set()
     return [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]

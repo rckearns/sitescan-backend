@@ -7,7 +7,7 @@ from typing import Optional
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.services.scoring import classify_project, score_match, score_with_value_boost
+from app.services.scoring import classify_project
 
 logger = logging.getLogger("sitescan.scanners")
 
@@ -70,7 +70,7 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
                 elif isinstance(opp.get("description"), str):
                     desc = _clean_text(opp["description"])
                 cat = classify_project(title, desc)
-                ms = score_with_value_boost(score_match(title, desc, keywords), None)
+                ms = 50  # scored dynamically per-user at request time
                 results.append({
                     "source_id": "sam-gov", "external_id": str(opp.get("noticeId", "")),
                     "title": title, "description": desc, "location": state,
@@ -156,7 +156,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=100):
 
                 ext_id = str(a.get("OBJECTID") or a.get("PERMIT_NUMBER") or hash(title))
                 cat = classify_project(title, full_desc)
-                ms = score_with_value_boost(score_match(title, full_desc), value)
+                ms = 50  # scored dynamically per-user at request time
 
                 results.append({
                     "source_id": "charleston-permits",
@@ -221,7 +221,7 @@ async def scan_scbo():
                     ext_id = proj_num or f"scbo-{date_str}-{i}"
                     full_desc = f"{name}. {desc_text}. Cost: {cost_range}".strip()
                     cat = classify_project(name, full_desc)
-                    ms = score_match(name, full_desc)
+                    ms = 50  # scored dynamically per-user at request time
                     value = None
                     val_m = re.findall(r'\$([\d,]+)', cost_range)
                     if val_m:
@@ -263,7 +263,7 @@ async def scan_charleston_bids():
                     bid_no, title = m.group(1), m.group(2).strip()
                     desc = " ".join(lines[j+1:j+4]) if j+1 < len(lines) else ""
                     cat = classify_project(title, desc)
-                    ms = score_match(title, desc)
+                    ms = 50  # scored dynamically per-user at request time
                     results.append({
                         "source_id": "charleston-city-bids",
                         "external_id": f"chs-bid-{bid_no}",

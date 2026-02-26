@@ -160,7 +160,8 @@ async def run_full_scan(
     and the manual scan API endpoint.
     """
     import os
-    logger.info(f"DB URL in run_full_scan: {os.environ.get('DATABASE_URL', 'NOT SET')[:30]}")
+    db_vars = {k:v[:30] for k,v in os.environ.items() if "database" in k.lower() or "postgres" in k.lower() or "pg" in k.lower()}
+    logger.info(f"DB env vars: {db_vars}")
     session_factory = get_session_factory()
     source_ids = sources or list(ALL_SCANNERS.keys())
     logs = []

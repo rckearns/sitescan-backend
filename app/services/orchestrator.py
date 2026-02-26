@@ -21,7 +21,7 @@ async def upsert_projects(session: AsyncSession, projects: list[dict]) -> tuple[
     """Insert new projects or update existing ones. Returns (total, new_count)."""
     new_count = 0
 
-    async with session.no_autoflush:
+    with session.no_autoflush:
         for proj in projects:
             # Check if exists
             result = await session.execute(

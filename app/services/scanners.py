@@ -113,6 +113,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=100):
         "where": "1=1", "outFields": "*",
         "orderByFields": "ISSUE_DATE DESC",
         "resultRecordCount": str(record_count), "f": "json",
+        "outSR": "4326",   # return geometry as WGS84 lat/lng (default is SC State Plane ft)
     }
     results = []
 

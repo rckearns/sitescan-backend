@@ -98,7 +98,7 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     return [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]
 
 
-async def scan_charleston_permits(arcgis_url="", record_count=100):
+async def scan_charleston_permits(arcgis_url="", record_count=500):
     """Fetch permits from Charleston ArcGIS. Field names:
     OBJECTID, DESCRIPTION, PERMIT_NUMBER, PERMIT_TYPE, WORK_CLASS,
     PERMIT_STATUS, ISSUE_DATE, VALUATION, ADDRESS, CONTRACTOR, LATITUDE, LONGITUDE

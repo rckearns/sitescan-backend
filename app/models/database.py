@@ -187,22 +187,27 @@ def get_session_factory():
 async def init_db():
     """Create all tables and run lightweight column migrations."""
     get_session_factory()  # ensures _engine is initialized
+    is_postgres = "postgresql" in str(_engine.url)
+
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Widen naics_code from VARCHAR(20) → TEXT (safe no-op if already TEXT)
-        await conn.execute(text(
-            "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT"
-        ))
-        # Add scoring criteria columns (safe no-op if already exist)
-        for col, typedef in [
-            ("criteria_min_value", "FLOAT"),
-            ("criteria_categories", "JSON"),
-            ("criteria_statuses", "JSON"),
-            ("criteria_sources", "JSON"),
-        ]:
+
+        if is_postgres:
+            # Widen naics_code from VARCHAR(20) → TEXT (safe no-op if already TEXT)
+            # NOTE: ALTER COLUMN TYPE is PostgreSQL-only — skip on SQLite
             await conn.execute(text(
-                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}"
+                "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT"
             ))
+            # Add scoring criteria columns if they don't exist yet
+            for col, typedef in [
+                ("criteria_min_value", "FLOAT"),
+                ("criteria_categories", "JSON"),
+                ("criteria_statuses", "JSON"),
+                ("criteria_sources", "JSON"),
+            ]:
+                await conn.execute(text(
+                    f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}"
+                ))
 
 
 async def get_db():

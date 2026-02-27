@@ -8,6 +8,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.services.scoring import classify_project
+from app.services.geocode import geocode
 
 logger = logging.getLogger("sitescan.scanners")
 
@@ -52,6 +53,11 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     if state:
         params["state"] = state
 
+    # Geocode state centroid once (cached after first call)
+    state_coords = await geocode(f"{state}, USA") if state else None
+    state_lat = state_coords[0] if state_coords else None
+    state_lng = state_coords[1] if state_coords else None
+
     results = []
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -74,6 +80,7 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
                 results.append({
                     "source_id": "sam-gov", "external_id": str(opp.get("noticeId", "")),
                     "title": title, "description": desc, "location": state,
+                    "latitude": state_lat, "longitude": state_lng,
                     "value": None, "category": cat, "match_score": ms,
                     "status": "Open" if opp.get("active") == "Yes" else "Closed",
                     "posted_date": _parse_date(opp.get("postedDate")),
@@ -229,11 +236,16 @@ async def scan_scbo():
                             value = int(val_m[-1].replace(',', ''))
                         except (ValueError, IndexError):
                             pass
+                    loc_str = location or "South Carolina"
+                    geo_query = f"{loc_str}, South Carolina, USA" if loc_str != "South Carolina" else "Columbia, South Carolina, USA"
+                    coords = await geocode(geo_query)
                     results.append({
                         "source_id": "scbo", "external_id": ext_id,
                         "title": _clean_text(name, 500),
                         "description": _clean_text(full_desc, 1000),
-                        "location": location or "South Carolina",
+                        "location": loc_str,
+                        "latitude": coords[0] if coords else None,
+                        "longitude": coords[1] if coords else None,
                         "value": value, "category": cat, "match_score": ms,
                         "status": "Accepting Bids",
                         "posted_date": _parse_date(date_str),
@@ -270,6 +282,7 @@ async def scan_charleston_bids():
                         "title": f"{bid_no} — {_clean_text(title, 300)}",
                         "description": _clean_text(desc, 1000),
                         "location": "Charleston, SC", "category": cat, "match_score": ms,
+                        "latitude": 32.7765, "longitude": -79.9311,
                         "status": "Accepting Bids", "posted_date": datetime.utcnow(),
                         "solicitation_number": bid_no,
                         "source_url": "https://www.charleston-sc.gov/Bids.aspx?CatID=17",

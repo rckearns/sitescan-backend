@@ -28,7 +28,7 @@ async def list_projects(
     search: Optional[str] = Query(None, description="Keyword search in title and description"),
     sort_by: str = Query("match_score", enum=["match_score", "value", "posted_date", "first_seen"]),
     sort_dir: str = Query("desc", enum=["asc", "desc"]),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     active_only: bool = Query(True),
     db: AsyncSession = Depends(get_db),

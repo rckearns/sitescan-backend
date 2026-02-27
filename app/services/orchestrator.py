@@ -43,6 +43,11 @@ async def upsert_projects(session: AsyncSession, projects: list[dict]) -> tuple[
                 existing.is_active = True
                 if proj.get("deadline"):
                     existing.deadline = proj["deadline"]
+                # Backfill coordinates when scanner now provides them
+                if proj.get("latitude") is not None:
+                    existing.latitude = proj["latitude"]
+                if proj.get("longitude") is not None:
+                    existing.longitude = proj["longitude"]
             else:
                 # Insert new
                 new_proj = Project(
@@ -118,7 +123,8 @@ async def run_source_scan(
                                  "category": p.category, "match_score": p.match_score, "status": p.status,
                                  "posted_date": p.posted_date, "deadline": p.deadline, "agency": p.agency,
                                  "solicitation_number": p.solicitation_number, "naics_code": p.naics_code,
-                                 "source_url": p.source_url, "raw_data": p.raw_data}
+                                 "source_url": p.source_url, "raw_data": p.raw_data,
+                                 "latitude": p.latitude, "longitude": p.longitude}
                                 for p in all_cached.scalars().all()]
                 else:
                     projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)

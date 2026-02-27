@@ -89,10 +89,8 @@ async def list_projects(
     if sort_by == "match_score":
         scored.sort(key=lambda x: x[1], reverse=reverse)
     elif sort_by == "value":
-        scored.sort(
-            key=lambda x: (x[0].value is None, x[0].value or 0),
-            reverse=reverse,
-        )
+        # Treat None/0 as 0 — sorts to bottom on high-to-low, top on low-to-high
+        scored.sort(key=lambda x: x[0].value or 0, reverse=reverse)
     elif sort_by == "posted_date":
         scored.sort(
             key=lambda x: (x[0].posted_date is None, x[0].posted_date or datetime.min),

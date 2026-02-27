@@ -113,6 +113,43 @@ async def list_projects(
     return ProjectListResponse(total=total, projects=projects_out)
 
 
+@router.get("/map/points")
+async def map_points(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return all active projects that have coordinates, for map display.
+
+    Returns a lightweight payload — no 100-project limit — so the map
+    always shows everything available regardless of scanner filters.
+    """
+    result = await db.execute(
+        select(Project).where(
+            Project.is_active == True,
+            Project.latitude.is_not(None),
+            Project.longitude.is_not(None),
+        )
+    )
+    projects = result.scalars().all()
+
+    return [
+        {
+            "id": p.id,
+            "title": p.title,
+            "location": p.location,
+            "latitude": p.latitude,
+            "longitude": p.longitude,
+            "match_score": score_against_profile(p, user),
+            "value": p.value,
+            "status": p.status,
+            "category": p.category,
+            "source_id": p.source_id,
+            "source_url": p.source_url,
+        }
+        for p in projects
+    ]
+
+
 @router.get("/{project_id}", response_model=ProjectOut)
 async def get_project(
     project_id: int,

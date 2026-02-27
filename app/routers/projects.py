@@ -2,10 +2,12 @@
 
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 from typing import Optional
+import httpx
 
 from app.models.database import Project, SavedProject, ScanLog, get_db, User
 from app.models.schemas import (
@@ -146,6 +148,43 @@ async def map_points(
         }
         for p in projects
     ]
+
+
+@router.get("/map/parcels")
+async def map_parcels(
+    west: float = Query(...),
+    south: float = Query(...),
+    east: float = Query(...),
+    north: float = Query(...),
+    limit: int = Query(800, ge=1, le=1000),
+    user: User = Depends(get_current_user),
+):
+    """Proxy parcel GeoJSON from Charleston ArcGIS to avoid browser CORS restrictions.
+
+    The GIS server does not send Access-Control-Allow-Origin headers, so the
+    browser cannot call it directly. This endpoint fetches server-to-server and
+    forwards the GeoJSON back to the client.
+    """
+    arcgis_url = (
+        "https://gis.charleston-sc.gov/arcgis2/rest/services/"
+        "External/Zoning/MapServer/26/query"
+    )
+    params = {
+        "geometry": f"{west},{south},{east},{north}",
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "outSR": "4326",
+        "outFields": "TMS,PARCELID,OWNER,STREET,HOUSE,GENUSE,YRBUILT,APPRVAL,IMP_APPR,LAND_APPR",
+        "f": "geojson",
+        "resultRecordCount": str(limit),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(arcgis_url, params=params)
+            resp.raise_for_status()
+            return Response(content=resp.content, media_type="application/geo+json")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"ArcGIS request failed: {e}")
 
 
 @router.get("/{project_id}", response_model=ProjectOut)

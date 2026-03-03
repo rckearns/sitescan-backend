@@ -108,6 +108,32 @@ async def test_connectivity(user: User = Depends(get_current_user)):
     return results
 
 
+@router.get("/debug-permits")
+async def debug_permits(
+    address: str = Query("CALHOUN", description="Address substring to search"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Show DB state for permits matching an address — useful for diagnosing contractor enrichment."""
+    from app.models.database import Project
+    result = await db.execute(
+        select(Project).where(Project.address.ilike(f"%{address}%"))
+    )
+    permits = result.scalars().all()
+    return [
+        {
+            "external_id": p.external_id,
+            "address": p.address,
+            "title": p.title[:80],
+            "contractor": p.contractor or "(empty)",
+            "is_active": p.is_active,
+            "category": p.category,
+            "last_seen": p.last_seen.isoformat() if p.last_seen else None,
+        }
+        for p in permits
+    ]
+
+
 @router.get("/sources")
 async def list_sources(user: User = Depends(get_current_user)):
     from app.services.scanners import ALL_SCANNERS

@@ -148,7 +148,30 @@ async def run_source_scan(
                 projects = await scan_charleston_permits(arcgis_url=settings.charleston_arcgis_url)
 
             elif source_id == "scbo":
-                projects = await scan_scbo()
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                cached = await session.execute(
+                    select(Project).where(
+                        Project.source_id == "scbo",
+                        Project.last_seen >= today_start,
+                    ).limit(1)
+                )
+                if cached.scalar_one_or_none():
+                    logger.info("SCBO: using cached results from today")
+                    all_cached = await session.execute(
+                        select(Project).where(Project.source_id == "scbo", Project.is_active == True)
+                    )
+                    projects = [
+                        {"source_id": "scbo", "external_id": p.external_id, "title": p.title,
+                         "description": p.description, "location": p.location, "value": p.value,
+                         "category": p.category, "match_score": p.match_score, "status": p.status,
+                         "posted_date": p.posted_date, "deadline": p.deadline, "agency": p.agency,
+                         "solicitation_number": p.solicitation_number, "naics_code": p.naics_code,
+                         "source_url": p.source_url, "raw_data": p.raw_data,
+                         "latitude": p.latitude, "longitude": p.longitude}
+                        for p in all_cached.scalars().all()
+                    ]
+                else:
+                    projects = await scan_scbo()
 
             elif source_id == "charleston-city-bids":
                 projects = await scan_charleston_bids()

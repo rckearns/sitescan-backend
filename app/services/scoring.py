@@ -181,17 +181,36 @@ CATEGORY_PATTERNS = [
 
 
 def classify_project(title: str, description: str = "") -> str:
-    """Classify a project into a category based on title and description."""
-    text = f"{title} {description}"
+    """Classify a project into a category based on title and description.
 
-    scores = {}
-    for cat_id, pattern in CATEGORY_PATTERNS:
-        matches = pattern.findall(text)
-        scores[cat_id] = len(matches)
+    Priority order:
+    1. Specific building types (hotel, multi-family, office, mixed-use, etc.)
+    2. Work-type categories (historic-restoration, masonry, structural, government)
+    3. Generic commercial catch-all
+    4. Residential (default — filtered out of the UI)
+    """
+    # 1. Specific building type — gives us hotel / multi-family / office / etc.
+    building_type = classify_building_type(title, description)
+    if building_type and building_type != "single-family":
+        return building_type
 
-    if not scores or max(scores.values()) == 0:
-        return "residential"
-    return max(scores, key=scores.get)
+    # 2. Work-type categories (ordered by specificity)
+    work_type_patterns = [
+        ("historic-restoration", CATEGORY_PATTERNS[0][1]),
+        ("masonry", CATEGORY_PATTERNS[1][1]),
+        ("structural", CATEGORY_PATTERNS[2][1]),
+        ("government", CATEGORY_PATTERNS[3][1]),
+    ]
+    for cat_id, pattern in work_type_patterns:
+        if pattern.search(f"{title} {description}"):
+            return cat_id
+
+    # 3. Generic commercial (broad catch-all)
+    if CATEGORY_PATTERNS[4][1].search(f"{title} {description}"):
+        return "commercial"
+
+    # 4. Default — residential (excluded from project list display)
+    return "residential"
 
 
 # ─── PROFILE-BASED MATCH SCORING ────────────────────────────────────────────

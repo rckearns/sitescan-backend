@@ -40,6 +40,7 @@ async def upsert_projects(session: AsyncSession, projects: list[dict]) -> tuple[
                 existing.status = proj.get("status", existing.status)
                 existing.match_score = proj.get("match_score", existing.match_score)
                 existing.value = proj.get("value", existing.value)
+                existing.category = proj.get("category", existing.category)
                 existing.is_active = True
                 if proj.get("deadline"):
                     existing.deadline = proj["deadline"]

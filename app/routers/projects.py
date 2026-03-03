@@ -48,9 +48,13 @@ async def list_projects(
 
     if active_only:
         conditions.append(Project.is_active == True)
+        # Exclude finaled/complete permits from the project list — they still exist
+        # in the DB for contractor discovery but aren't actionable opportunities
+        conditions.append(Project.status.not_in(["Finaled", "Expired", "Void", "Cancelled"]))
 
-    # Residential permits are not relevant to this tool — always exclude
-    conditions.append(Project.category != "residential")
+    # Residential and trade-permit categories are not shown in the project list.
+    # Trade permits are stored for contractor discovery only (see /subcontractors endpoint).
+    conditions.append(Project.category.not_in(["residential", "trade-permit"]))
 
     if categories:
         cat_list = [c.strip() for c in categories.split(",")]
@@ -131,7 +135,8 @@ async def map_points(
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
-            Project.category != "residential",
+            Project.category.not_in(["residential", "trade-permit"]),
+            Project.status.not_in(["Finaled", "Expired", "Void", "Cancelled"]),
             Project.latitude.is_not(None),
             Project.longitude.is_not(None),
         )
@@ -315,7 +320,8 @@ async def project_stats(
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
-            Project.category != "residential",
+            Project.category.not_in(["residential", "trade-permit"]),
+            Project.status.not_in(["Finaled", "Expired", "Void", "Cancelled"]),
         )
     )
     projects = result.scalars().all()

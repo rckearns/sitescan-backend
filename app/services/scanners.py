@@ -1,5 +1,6 @@
 """Data source scanners — fetch opportunities from external APIs and websites."""
 
+import asyncio
 import re
 import logging
 from datetime import datetime, timedelta
@@ -98,16 +99,62 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     return [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]
 
 
+# EnerGov CSS API tenant headers (TenantID=1, TenantName="CharlestonSC")
+_ENERGOV_TENANT_HEADERS = {
+    "tenantId": "1",
+    "tenantName": "CharlestonSC",
+    "Tyler-TenantUrl": "CharlestonSC",
+    "Tyler-Tenant-Culture": "en-US",
+    "Accept": "application/json",
+}
+_ENERGOV_PERMIT_URL = (
+    "https://egcss.charleston-sc.gov/EnerGov_Prod/selfservice/api/energov/permits/permit/{}"
+)
+
+
+async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) -> str:
+    """Look up the contractor name for a permit via the EnerGov CSS API.
+    Returns the GlobalEntityName of the Contractor contact, or "" on any error.
+    """
+    if not pmpermitid:
+        return ""
+    try:
+        resp = await client.get(
+            _ENERGOV_PERMIT_URL.format(pmpermitid),
+            headers=_ENERGOV_TENANT_HEADERS,
+            timeout=10.0,
+        )
+        if resp.status_code != 200:
+            return ""
+        data = resp.json()
+        result = data.get("Result") or {}
+        contacts = result.get("Contacts") or []
+        # Prefer a contact typed "Contractor"; fall back to first contact with an entity name
+        for contact in contacts:
+            if (contact.get("ContactTypeName") or "").lower() == "contractor":
+                name = (contact.get("GlobalEntityName") or "").strip()
+                if name:
+                    return name
+        for contact in contacts:
+            name = (contact.get("GlobalEntityName") or "").strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    return ""
+
+
 async def scan_charleston_permits(arcgis_url="", record_count=500):
-    """Fetch permits from Charleston ArcGIS (External/Applications/MapServer/20).
-    Actual field names (verified 2026-03):
+    """Fetch permits from Charleston ArcGIS (External/Applications/MapServer/20),
+    then enrich each record with contractor name via the EnerGov CSS API.
+
+    Actual ArcGIS field names (verified 2026-03):
     OBJECTID, PMPERMITID, PERMIT_NUMBER, PERMIT_TYPE, WORK_CLASS,
     PERMIT_STATUS, DESCRIPTION, APPLICATION_DATE, ISSUE_DATE, ISSUE_YEAR,
     EXPIRATION_DATE, FINALED_DATE, LAST_INSPECTION_DATE, SQUARE_FEET, VALUATION,
     DISTRICT, PROJECT, MAIN_PARCEL_NUMBER, PERMIT_ADDRESS_LINE1, PERMIT_ADDRESS_LINE2,
     PARCELADDR_LINE1, PARCELADDR_LINE2, ZIPCODE, MAIN_ZONE, ASSIGNED_TO,
     TOTAL_FEE_AMOUNT, GISADDRESSID, PASSEDFINAL, FLD_ZONE, Station, StationZon, BATTALION
-    NOTE: No CONTRACTOR field is exposed by this layer.
     """
     if not arcgis_url:
         arcgis_url = (
@@ -129,9 +176,13 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
             resp.raise_for_status()
             data = resp.json()
 
-            logger.info(f"Charleston ArcGIS returned {len(data.get('features', []))} features")
+            features = data.get("features", [])
+            logger.info(f"Charleston ArcGIS returned {len(features)} features")
 
-            for feature in data.get("features", []):
+            # Build permit records from ArcGIS data
+            raw_records = []
+            pmpermitids = []
+            for feature in features:
                 a = feature.get("attributes", {})
 
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
@@ -169,9 +220,11 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
 
                 ext_id = str(a.get("OBJECTID") or a.get("PERMIT_NUMBER") or hash(title))
                 cat = classify_project(title, full_desc)
-                ms = 50  # scored dynamically per-user at request time
 
-                results.append({
+                pmpermitid = str(a.get("PMPERMITID") or "")
+                pmpermitids.append(pmpermitid)
+
+                raw_records.append({
                     "source_id": "charleston-permits",
                     "external_id": f"chs-{ext_id}",
                     "title": title, "description": full_desc,
@@ -179,7 +232,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                     "address": address,
                     "latitude": float(lat) if lat else None,
                     "longitude": float(lng) if lng else None,
-                    "value": value, "category": cat, "match_score": ms,
+                    "value": value, "category": cat, "match_score": 50,
                     "status": str(a.get("PERMIT_STATUS") or "Active"),
                     "posted_date": posted,
                     "permit_number": str(a.get("PERMIT_NUMBER") or ""),
@@ -187,6 +240,26 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                     "source_url": "https://gis.charleston-sc.gov/interactive/permits/",
                     "raw_data": a,
                 })
+
+            # Concurrently enrich with contractor names from EnerGov
+            # Use a semaphore to limit concurrent requests (avoid hammering the server)
+            semaphore = asyncio.Semaphore(15)
+
+            async def fetch_with_semaphore(pid):
+                async with semaphore:
+                    return await _fetch_energov_contractor(client, pid)
+
+            logger.info(f"Fetching contractor data from EnerGov for {len(pmpermitids)} permits...")
+            contractors = await asyncio.gather(
+                *[fetch_with_semaphore(pid) for pid in pmpermitids]
+            )
+
+            enriched = sum(1 for c in contractors if c)
+            logger.info(f"EnerGov enrichment: {enriched}/{len(pmpermitids)} permits have contractor data")
+
+            for record, contractor in zip(raw_records, contractors):
+                record["contractor"] = contractor
+                results.append(record)
 
     except Exception as e:
         logger.error(f"Charleston Permits error: {e}")

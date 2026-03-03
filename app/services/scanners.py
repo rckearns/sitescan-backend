@@ -206,7 +206,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
     # 310 Broad St). Finaled permits are still valuable for contractor intelligence: even if the
     # project is complete, knowing which contractors (Balfour, Haddigan) worked on it is useful.
     layer21_params = {
-        "where": "PERMIT_STATUS NOT IN ('Void', 'Cancelled')",
+        "where": "PERMIT_STATUS <> 'Void' AND PERMIT_STATUS <> 'Cancelled'",
         "outFields": "*",
         "resultRecordCount": "5000",
         "f": "json",
@@ -225,8 +225,15 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
             resp20.raise_for_status()
             resp21.raise_for_status()
 
-            feats20 = resp20.json().get("features", [])
-            feats21 = resp21.json().get("features", [])
+            data20 = resp20.json()
+            data21 = resp21.json()
+            if "error" in data20:
+                raise RuntimeError(f"ArcGIS Layer 20 error: {data20['error']}")
+            if "error" in data21:
+                logger.warning(f"ArcGIS Layer 21 error (skipping): {data21['error']}")
+                data21 = {}
+            feats20 = data20.get("features", [])
+            feats21 = data21.get("features", [])
             logger.info(f"ArcGIS Layer 20: {len(feats20)} features, Layer 21: {len(feats21)} features")
 
             # Merge and deduplicate by PMPERMITID (Layer 20 takes precedence for duplicates)

@@ -162,13 +162,36 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
             "External/Applications/MapServer/20/query"
         )
 
+    # Filter by permit TYPE rather than date/status ordering.
+    # This ensures we get ALL permits of the relevant types regardless of when they were issued,
+    # avoiding the date-cutoff problem that hides older active projects.
+    # Trade permit types (Electrical, Roofing, Plumbing, etc.) are included so their
+    # contractors appear in the contractor list; they get category="trade-permit" and
+    # are filtered from the project list API.
+    # Actual Charleston status values: Issued, Completed, Applied, Applied Online,
+    # Needs Review, Under Review  (no "Finaled" — that's "Completed" here)
+    _GC_PERMIT_TYPES = (
+        "Building Commercial",
+        "Building Multi-Family",
+        "Demolition",
+        "Foundation",
+        "Construction Activity Type 2",
+    )
+    _TRADE_PERMIT_TYPES = (
+        "Electrical - Commercial",
+        "Roofing - Commercial",
+        "Plumbing - Commercial",
+        "Plumbing",
+        "Mechanical",
+        "xDNU Mechanical - Commercial",
+        "Fire Protection System - Standalone",
+    )
+    _all_types = _GC_PERMIT_TYPES + _TRADE_PERMIT_TYPES
+    type_in = ", ".join(f"'{t}'" for t in _all_types)
     params = {
-        # Exclude only truly dead permits; include Finaled so we capture recently-completed
-        # GC projects (and their contractor names) even after construction is done.
-        "where": "PERMIT_STATUS NOT IN ('Expired', 'Void', 'Cancelled')",
+        "where": f"PERMIT_TYPE IN ({type_in}) AND PERMIT_STATUS NOT IN ('Void', 'Cancelled')",
         "outFields": "*",
-        "orderByFields": "ISSUE_DATE DESC",
-        "resultRecordCount": "1000",
+        "resultRecordCount": "5000",
         "f": "json",
         "outSR": "4326",   # return geometry as WGS84 lat/lng (default is SC State Plane ft)
     }

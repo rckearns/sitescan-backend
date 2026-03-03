@@ -374,8 +374,33 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
     return results
 
 
+async def _fetch_scbo_html(url: str) -> str:
+    """Fetch SCBO page HTML, routing through ZenRows proxy when key is configured."""
+    from app.config import get_settings
+    settings = get_settings()
+    if settings.zenrows_api_key:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(
+                "https://api.zenrows.com/v1/",
+                params={"apikey": settings.zenrows_api_key, "url": url},
+            )
+            resp.raise_for_status()
+            return resp.text
+    if _CURL_CFFI_AVAILABLE:
+        async with CurlSession(impersonate="chrome120") as client:
+            resp = await client.get(url, timeout=30)
+            resp.raise_for_status()
+            return resp.text
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.text
+
+
 async def scan_scbo():
     """Scrape SC Business Opportunities - Construction category."""
+    from app.config import get_settings
+    settings = get_settings()
     results = []
     today = datetime.utcnow()
     for days_ago in range(7):
@@ -383,22 +408,11 @@ async def scan_scbo():
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
         try:
-            if _CURL_CFFI_AVAILABLE:
-                client_ctx = CurlSession(impersonate="chrome120")
-            else:
-                logger.warning("curl-cffi not available, falling back to httpx for SCBO")
-                client_ctx = httpx.AsyncClient(
-                    timeout=30.0, follow_redirects=True, verify=False,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"},
-                )
-            async with client_ctx as client:
-                resp = await client.get(url, timeout=30)
-                resp.raise_for_status()
-                html = resp.text
-                logger.info(f"SCBO {date_str}: response {len(html)} bytes, status {resp.status_code}, curl_cffi={_CURL_CFFI_AVAILABLE}")
-                if "<b>Project Name:</b>" not in html:
-                    logger.warning(f"SCBO {date_str}: no project markers found — possible Cloudflare block. First 300 chars: {html[:300]!r}")
-                chunks = html.split("<b>Project Name:</b>")
+            html = await _fetch_scbo_html(url)
+            logger.info(f"SCBO {date_str}: {len(html)} bytes, zenrows={'yes' if settings.zenrows_api_key else 'no'}")
+            if "<b>Project Name:</b>" not in html:
+                logger.warning(f"SCBO {date_str}: no project markers — block/empty. First 200: {html[:200]!r}")
+            chunks = html.split("<b>Project Name:</b>")
                 for i, chunk in enumerate(chunks[1:], 1):
                     def grab(label):
                         idx = chunk.find("<b>" + label + "</b>")

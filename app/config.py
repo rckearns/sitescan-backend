@@ -51,6 +51,7 @@ class Settings(BaseSettings):
         "External/Applications/MapServer/20/query"
     )
     constructconnect_api_key: str = ""
+    zenrows_api_key: str = ""
 
     model_config = {"env_file": None}
 

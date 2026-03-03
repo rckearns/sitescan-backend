@@ -163,9 +163,12 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
         )
 
     params = {
-        "where": "1=1", "outFields": "*",
+        # Exclude finaled/expired/voided permits — keeps active projects regardless of age
+        "where": "PERMIT_STATUS NOT IN ('Finaled', 'Expired', 'Void', 'Cancelled')",
+        "outFields": "*",
         "orderByFields": "ISSUE_DATE DESC",
-        "resultRecordCount": str(record_count), "f": "json",
+        "resultRecordCount": "1000",
+        "f": "json",
         "outSR": "4326",   # return geometry as WGS84 lat/lng (default is SC State Plane ft)
     }
     results = []

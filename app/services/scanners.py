@@ -163,9 +163,13 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
         )
 
     params = {
-        "where": "1=1", "outFields": "*",
+        # Exclude only truly dead permits; include Finaled so we capture recently-completed
+        # GC projects (and their contractor names) even after construction is done.
+        "where": "PERMIT_STATUS NOT IN ('Expired', 'Void', 'Cancelled')",
+        "outFields": "*",
         "orderByFields": "ISSUE_DATE DESC",
-        "resultRecordCount": str(record_count), "f": "json",
+        "resultRecordCount": "1000",
+        "f": "json",
         "outSR": "4326",   # return geometry as WGS84 lat/lng (default is SC State Plane ft)
     }
     results = []
@@ -187,31 +191,34 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
 
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
 
-                # Skip permit types that are not GC / sitework / demolition work
-                _SKIP_PERMIT_RE = re.compile(
+                # Identify trade permits (electrical, plumbing, mechanical, etc.).
+                # We no longer skip these entirely — we store them with category="trade-permit"
+                # so they contribute to contractor discovery without appearing in the project list.
+                _TRADE_PERMIT_RE = re.compile(
                     r"operational\s+permit|zoning\s+verification|fire\s+protection|"
                     r"fire\s+alarm|electrical|plumbing|mechanical|gas\s+pipe|"
                     r"low\s+voltage|sign\s+permit|temporary\s+use|"
                     r"short[\s-]*term\s+rental",
                     re.IGNORECASE,
                 )
-                if _SKIP_PERMIT_RE.search(permit_type):
-                    continue
+                is_trade_permit = bool(_TRADE_PERMIT_RE.search(permit_type))
 
                 address = str(a.get("PERMIT_ADDRESS_LINE1") or a.get("ADDRESS") or "")
                 description = _clean_text(a.get("DESCRIPTION"))
                 work_class = str(a.get("WORK_CLASS") or "")
 
-                # Skip trade-specific work that files under a building permit type
-                _SKIP_DESC_RE = re.compile(
-                    r"^(fire\s+suppression|fire\s+alarm|fire\s+sprinkler|sprinkler\s+system|"
-                    r"fire\s+protection|low\s+voltage|security\s+alarm|short[\s-]*term\s+rental)",
-                    re.IGNORECASE,
-                )
-                if _SKIP_DESC_RE.search(description):
-                    continue
-                if _SKIP_DESC_RE.search(work_class):
-                    continue
+                # For non-trade building permits, also skip descriptions that are clearly
+                # trade-specific work filed under a generic building permit type
+                if not is_trade_permit:
+                    _SKIP_DESC_RE = re.compile(
+                        r"^(fire\s+suppression|fire\s+alarm|fire\s+sprinkler|sprinkler\s+system|"
+                        r"fire\s+protection|low\s+voltage|security\s+alarm|short[\s-]*term\s+rental)",
+                        re.IGNORECASE,
+                    )
+                    if _SKIP_DESC_RE.search(description):
+                        continue
+                    if _SKIP_DESC_RE.search(work_class):
+                        continue
 
                 # Build a human-readable title from description or work_class.
                 # "Building Commercial" is a permit-type code, not a useful title.
@@ -255,7 +262,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                 lng = a.get("LONGITUDE") or (feature.get("geometry", {}) or {}).get("x")
 
                 ext_id = str(a.get("OBJECTID") or a.get("PERMIT_NUMBER") or hash(title))
-                cat = classify_project(title, full_desc)
+                cat = "trade-permit" if is_trade_permit else classify_project(title, full_desc)
 
                 pmpermitid = str(a.get("PMPERMITID") or "")
                 pmpermitids.append(pmpermitid)

@@ -40,7 +40,7 @@ async def trigger_scan(
     state = user.search_state or "SC"
     background_tasks.add_task(_run_scan_background, sam_key, keywords, state, source_list)
     return ScanTriggerResponse(
-        message="Scan started — results will appear within ~2 minutes",
+        message="Scan started — CHS Permits takes ~10-15 min. Check History when complete.",
         scan_id=None,
     )
 

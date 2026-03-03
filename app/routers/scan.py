@@ -13,6 +13,17 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 
+async def _run_scan_background(sam_key, keywords, state, source_list):
+    """Background task: run full scan then process alerts."""
+    await run_full_scan(
+        sam_api_key=sam_key,
+        keywords=keywords,
+        state=state,
+        sources=source_list,
+    )
+    await process_alerts()
+
+
 @router.post("/trigger", response_model=ScanTriggerResponse)
 async def trigger_scan(
     background_tasks: BackgroundTasks,
@@ -27,18 +38,10 @@ async def trigger_scan(
     sam_key = user.sam_gov_api_key or settings.sam_gov_api_key or ""
     keywords = user.search_keywords or "masonry restoration structural"
     state = user.search_state or "SC"
-    logs = await run_full_scan(
-        sam_api_key=sam_key,
-        keywords=keywords,
-        state=state,
-        sources=source_list,
-    )
-    await process_alerts()
-    total_found = sum(l.projects_found for l in logs)
-    total_new = sum(l.projects_new for l in logs)
+    background_tasks.add_task(_run_scan_background, sam_key, keywords, state, source_list)
     return ScanTriggerResponse(
-        message=f"Scan complete: {total_found} projects found ({total_new} new)",
-        scan_id=logs[0].id if logs else None,
+        message="Scan started — results will appear within ~2 minutes",
+        scan_id=None,
     )
 
 @router.get("/history", response_model=list[ScanLogOut])

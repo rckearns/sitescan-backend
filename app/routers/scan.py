@@ -62,24 +62,17 @@ async def test_connectivity(user: User = Depends(get_current_user)):
     from datetime import datetime
     results = {}
 
-    # Test SCBO
+    # Test SCBO (uses same path as the scanner — ZenRows if key set, else curl-cffi)
     try:
-        from app.services.scanners import _CURL_CFFI_AVAILABLE
+        from app.services.scanners import _fetch_scbo_html
+        from app.config import get_settings as _gs
+        _settings = _gs()
         today = datetime.utcnow()
         date_str = f"{today.year}-{today.month:02d}-{today.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
-        if _CURL_CFFI_AVAILABLE:
-            from curl_cffi.requests import AsyncSession as CurlSession
-            async with CurlSession(impersonate="chrome120") as client:
-                resp = await client.get(url, timeout=30)
-                html = resp.text
-        else:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:
-                resp = await client.get(url)
-                html = resp.text
+        html = await _fetch_scbo_html(url)
         results["scbo"] = {
-            "curl_cffi_available": _CURL_CFFI_AVAILABLE,
-            "status_code": resp.status_code,
+            "via_zenrows": bool(_settings.zenrows_api_key),
             "response_bytes": len(html),
             "has_project_markers": "<b>Project Name:</b>" in html,
             "project_count": html.count("<b>Project Name:</b>"),

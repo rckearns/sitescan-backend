@@ -117,6 +117,35 @@ class ProjectFilters(BaseModel):
     offset: int = 0
 
 
+# ─── SUBCONTRACTORS ──────────────────────────────────────────────────────────
+
+class SubcontractorProjectOut(BaseModel):
+    id: int
+    title: str
+    value: Optional[float]
+    category: str
+    source_id: str
+    status: str
+    posted_date: Optional[datetime]
+    source_url: str
+    permit_number: str
+    address: str
+
+    class Config:
+        from_attributes = True
+
+class SubcontractorOut(BaseModel):
+    name: str
+    project_count: int
+    total_scope_value: float
+    median_project_value: Optional[float]
+    projects: list[SubcontractorProjectOut]
+
+class SubcontractorListResponse(BaseModel):
+    total_subcontractors: int
+    subcontractors: list[SubcontractorOut]
+
+
 # ─── SAVED PROJECTS ─────────────────────────────────────────────────────────
 
 class SaveProjectRequest(BaseModel):

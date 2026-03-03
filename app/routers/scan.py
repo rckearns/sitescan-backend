@@ -55,6 +55,66 @@ async def scan_history(
     )
     return result.scalars().all()
 
+@router.get("/connectivity")
+async def test_connectivity(user: User = Depends(get_current_user)):
+    """Test SCBO and EnerGov connectivity directly from this server."""
+    import httpx
+    from datetime import datetime
+    results = {}
+
+    # Test SCBO
+    try:
+        from app.services.scanners import _CURL_CFFI_AVAILABLE
+        today = datetime.utcnow()
+        date_str = f"{today.year}-{today.month:02d}-{today.day:02d}"
+        url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
+        if _CURL_CFFI_AVAILABLE:
+            from curl_cffi.requests import AsyncSession as CurlSession
+            async with CurlSession(impersonate="chrome120") as client:
+                resp = await client.get(url, timeout=30)
+                html = resp.text
+        else:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False) as client:
+                resp = await client.get(url)
+                html = resp.text
+        results["scbo"] = {
+            "curl_cffi_available": _CURL_CFFI_AVAILABLE,
+            "status_code": resp.status_code,
+            "response_bytes": len(html),
+            "has_project_markers": "<b>Project Name:</b>" in html,
+            "project_count": html.count("<b>Project Name:</b>"),
+            "preview": html[:400],
+        }
+    except Exception as e:
+        results["scbo"] = {"error": str(e)}
+
+    # Test EnerGov with 110 Calhoun (Emanuel Nine Memorial)
+    try:
+        pmpermitid = "47738947-fc93-440c-8b9e-4e3dc68b45cc"
+        headers = {
+            "tenantId": "1", "tenantName": "CharlestonSC",
+            "Tyler-TenantUrl": "CharlestonSC", "Tyler-Tenant-Culture": "en-US",
+            "Accept": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=35.0) as client:
+            resp = await client.get(
+                f"https://egcss.charleston-sc.gov/EnerGov_Prod/selfservice/api/energov/permits/permit/{pmpermitid}",
+                headers=headers,
+            )
+            data = resp.json()
+            contacts = (data.get("Result") or {}).get("Contacts") or []
+            results["energov"] = {
+                "status_code": resp.status_code,
+                "contacts_found": len(contacts),
+                "contractors": [c.get("GlobalEntityName") for c in contacts
+                                if (c.get("ContactTypeName") or "").lower() == "contractor"],
+            }
+    except Exception as e:
+        results["energov"] = {"error": str(e)}
+
+    return results
+
+
 @router.get("/sources")
 async def list_sources(user: User = Depends(get_current_user)):
     from app.services.scanners import ALL_SCANNERS

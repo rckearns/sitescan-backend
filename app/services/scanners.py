@@ -126,36 +126,40 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
     """
     if not pmpermitid:
         return ""
-    try:
-        resp = await client.get(
-            _ENERGOV_PERMIT_URL.format(pmpermitid),
-            headers=_ENERGOV_TENANT_HEADERS,
-            timeout=30.0,
-        )
-        if resp.status_code != 200:
-            return ""
-        data = resp.json()
-        result = data.get("Result") or {}
-        contacts = result.get("Contacts") or []
-        # Collect all contacts typed "Contractor"
-        names: list[str] = []
-        seen: set[str] = set()
-        for contact in contacts:
-            if (contact.get("ContactTypeName") or "").lower() == "contractor":
-                name = (contact.get("GlobalEntityName") or "").strip()
-                if name and name not in seen:
-                    names.append(name)
-                    seen.add(name)
-        # Fall back to any contact with an entity name if no "Contractor" typed contacts
-        if not names:
+    for attempt in range(3):
+        try:
+            resp = await client.get(
+                _ENERGOV_PERMIT_URL.format(pmpermitid),
+                headers=_ENERGOV_TENANT_HEADERS,
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                return ""
+            data = resp.json()
+            result = data.get("Result") or {}
+            contacts = result.get("Contacts") or []
+            # Collect all contacts typed "Contractor"
+            names: list[str] = []
+            seen: set[str] = set()
             for contact in contacts:
-                name = (contact.get("GlobalEntityName") or "").strip()
-                if name and name not in seen:
-                    names.append(name)
-                    seen.add(name)
-        return "|".join(names)
-    except Exception:
-        pass
+                if (contact.get("ContactTypeName") or "").lower() == "contractor":
+                    name = (contact.get("GlobalEntityName") or "").strip()
+                    if name and name not in seen:
+                        names.append(name)
+                        seen.add(name)
+            # Fall back to any contact with an entity name if no "Contractor" typed contacts
+            if not names:
+                for contact in contacts:
+                    name = (contact.get("GlobalEntityName") or "").strip()
+                    if name and name not in seen:
+                        names.append(name)
+                        seen.add(name)
+            return "|".join(names)
+        except Exception as exc:
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s
+            else:
+                logger.debug(f"EnerGov {pmpermitid} failed after 3 attempts: {exc}")
     return ""
 
 

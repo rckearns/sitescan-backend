@@ -165,6 +165,42 @@ class SavedProjectOut(BaseModel):
         from_attributes = True
 
 
+# ─── CONTRACTORS ─────────────────────────────────────────────────────────────
+
+class ContractorCreate(BaseModel):
+    name: str
+    type: str = "gc"          # "gc" or "sub"
+    specialty: str = ""
+    phone: str = ""
+    email: str = ""
+    website: str = ""
+    notes: str = ""
+
+class ContractorUpdate(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    specialty: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    website: Optional[str] = None
+    notes: Optional[str] = None
+
+class ContractorOut(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    type: str
+    specialty: str
+    phone: str
+    email: str
+    website: str
+    notes: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # ─── SCAN ────────────────────────────────────────────────────────────────────
 
 class ScanTriggerResponse(BaseModel):

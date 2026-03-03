@@ -52,6 +52,7 @@ class User(Base):
     # Relationships
     saved_projects = relationship("SavedProject", back_populates="user", cascade="all, delete-orphan")
     alert_history = relationship("AlertHistory", back_populates="user", cascade="all, delete-orphan")
+    contractors = relationship("Contractor", back_populates="user", cascade="all, delete-orphan")
 
 
 class Project(Base):
@@ -133,6 +134,24 @@ class AlertHistory(Base):
     
     user = relationship("User", back_populates="alert_history")
     project = relationship("Project")
+
+
+class Contractor(Base):
+    """A general contractor or subcontractor tracked by a user."""
+    __tablename__ = "contractors"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    type = Column(String(10), default="gc")        # "gc" or "sub"
+    specialty = Column(String(255), default="")    # e.g. "masonry", "structural", "MEP"
+    phone = Column(String(50), default="")
+    email = Column(String(255), default="")
+    website = Column(String(255), default="")
+    notes = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="contractors")
 
 
 class ScanLog(Base):

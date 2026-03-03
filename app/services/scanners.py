@@ -113,8 +113,10 @@ _ENERGOV_PERMIT_URL = (
 
 
 async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) -> str:
-    """Look up the contractor name for a permit via the EnerGov CSS API.
-    Returns the GlobalEntityName of the Contractor contact, or "" on any error.
+    """Look up all contractor names for a permit via the EnerGov CSS API.
+    Returns a pipe-delimited string of all Contractor contact names, or "" on any error.
+    Multi-contractor permits (e.g. GC + subs listed together) will return all names
+    so each contractor can be associated with this permit in the subcontractors view.
     """
     if not pmpermitid:
         return ""
@@ -129,16 +131,23 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
         data = resp.json()
         result = data.get("Result") or {}
         contacts = result.get("Contacts") or []
-        # Prefer a contact typed "Contractor"; fall back to first contact with an entity name
+        # Collect all contacts typed "Contractor"
+        names: list[str] = []
+        seen: set[str] = set()
         for contact in contacts:
             if (contact.get("ContactTypeName") or "").lower() == "contractor":
                 name = (contact.get("GlobalEntityName") or "").strip()
-                if name:
-                    return name
-        for contact in contacts:
-            name = (contact.get("GlobalEntityName") or "").strip()
-            if name:
-                return name
+                if name and name not in seen:
+                    names.append(name)
+                    seen.add(name)
+        # Fall back to any contact with an entity name if no "Contractor" typed contacts
+        if not names:
+            for contact in contacts:
+                name = (contact.get("GlobalEntityName") or "").strip()
+                if name and name not in seen:
+                    names.append(name)
+                    seen.add(name)
+        return "|".join(names)
     except Exception:
         pass
     return ""
@@ -353,7 +362,7 @@ async def scan_scbo():
     """Scrape SC Business Opportunities - Construction category."""
     results = []
     today = datetime.utcnow()
-    for days_ago in range(3):
+    for days_ago in range(7):
         d = today - timedelta(days=days_ago)
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"

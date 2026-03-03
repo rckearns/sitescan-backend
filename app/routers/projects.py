@@ -50,7 +50,7 @@ async def list_projects(
         conditions.append(Project.is_active == True)
         # Exclude finaled/complete permits from the project list — they still exist
         # in the DB for contractor discovery but aren't actionable opportunities
-        conditions.append(Project.status.not_in(["Finaled", "Expired", "Void", "Cancelled"]))
+        conditions.append(Project.status.not_in(["Completed", "Void", "Cancelled"]))
 
     # Residential and trade-permit categories are not shown in the project list.
     # Trade permits are stored for contractor discovery only (see /subcontractors endpoint).
@@ -136,7 +136,7 @@ async def map_points(
         select(Project).where(
             Project.is_active == True,
             Project.category.not_in(["residential", "trade-permit"]),
-            Project.status.not_in(["Finaled", "Expired", "Void", "Cancelled"]),
+            Project.status.not_in(["Completed", "Void", "Cancelled"]),
             Project.latitude.is_not(None),
             Project.longitude.is_not(None),
         )
@@ -321,7 +321,7 @@ async def project_stats(
         select(Project).where(
             Project.is_active == True,
             Project.category.not_in(["residential", "trade-permit"]),
-            Project.status.not_in(["Finaled", "Expired", "Void", "Cancelled"]),
+            Project.status.not_in(["Completed", "Void", "Cancelled"]),
         )
     )
     projects = result.scalars().all()

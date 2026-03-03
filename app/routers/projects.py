@@ -222,10 +222,13 @@ async def list_subcontractors(
 
     contractor_map: dict[str, list] = {}
     for p in projects:
-        name = (p.contractor or "").strip()
-        if not name:
+        raw = (p.contractor or "").strip()
+        if not raw:
             continue
-        contractor_map.setdefault(name, []).append(p)
+        for name in raw.split("|"):
+            name = name.strip()
+            if name:
+                contractor_map.setdefault(name, []).append(p)
 
     subcontractors = []
     for name, projs in contractor_map.items():
@@ -270,11 +273,14 @@ async def subcontractors_by_trade(
     # Build trade → contractor → [projects] map
     trade_map: dict[str, dict[str, list]] = {}
     for p in projects:
-        name = (p.contractor or "").strip()
-        if not name:
+        raw = (p.contractor or "").strip()
+        if not raw:
             continue
         trade = p.category or "unknown"
-        trade_map.setdefault(trade, {}).setdefault(name, []).append(p)
+        for name in raw.split("|"):
+            name = name.strip()
+            if name:
+                trade_map.setdefault(trade, {}).setdefault(name, []).append(p)
 
     trades: dict[str, list] = {}
     for trade, contractor_map in sorted(trade_map.items()):

@@ -413,55 +413,55 @@ async def scan_scbo():
             if "<b>Project Name:</b>" not in html:
                 logger.warning(f"SCBO {date_str}: no project markers — block/empty. First 200: {html[:200]!r}")
             chunks = html.split("<b>Project Name:</b>")
-                for i, chunk in enumerate(chunks[1:], 1):
-                    def grab(label):
-                        idx = chunk.find("<b>" + label + "</b>")
-                        if idx == -1:
-                            return ""
-                        after = chunk[idx:]
-                        m = re.search(r'margin-right:0\.5%["\x27]?>(.*?)</div>', after, re.DOTALL)
-                        return re.sub(r'<[^>]+>', ' ', m.group(1)).strip() if m else ""
-                    name_m = re.search(r'margin-right:0\.5%["\x27]?>(.*?)</div>', chunk, re.DOTALL)
-                    name = re.sub(r'<[^>]+>', ' ', name_m.group(1)).strip() if name_m else ""
-                    if not name or len(name) < 3:
-                        continue
-                    proj_num = grab("Project Number:")
-                    location = grab("Project Location:")
-                    agency = grab("Agency/Owner:")
-                    cost_range = grab("Construction Cost Range:")
-                    desc_text = ""
-                    dp = re.search(r'<p>(.*?)</p>', chunk, re.DOTALL)
-                    if dp:
-                        desc_text = re.sub(r'<[^>]+>', ' ', dp.group(1)).strip()
-                    ext_id = proj_num or f"scbo-{date_str}-{i}"
-                    full_desc = f"{name}. {desc_text}. Cost: {cost_range}".strip()
-                    cat = classify_project(name, full_desc)
-                    ms = 50  # scored dynamically per-user at request time
-                    value = None
-                    val_m = re.findall(r'\$([\d,]+)', cost_range)
-                    if val_m:
-                        try:
-                            value = int(val_m[-1].replace(',', ''))
-                        except (ValueError, IndexError):
-                            pass
-                    loc_str = location or "South Carolina"
-                    geo_query = f"{loc_str}, South Carolina, USA" if loc_str != "South Carolina" else "Columbia, South Carolina, USA"
-                    coords = await geocode(geo_query)
-                    results.append({
-                        "source_id": "scbo", "external_id": ext_id,
-                        "title": _clean_text(name, 500),
-                        "description": _clean_text(full_desc, 1000),
-                        "location": loc_str,
-                        "latitude": coords[0] if coords else None,
-                        "longitude": coords[1] if coords else None,
-                        "value": value, "category": cat, "match_score": ms,
-                        "status": "Accepting Bids",
-                        "posted_date": _parse_date(date_str),
-                        "agency": _clean_text(agency, 255),
-                        "solicitation_number": proj_num,
-                        "source_url": url,
-                        "raw_data": {"project_number": proj_num, "cost_range": cost_range},
-                    })
+            for i, chunk in enumerate(chunks[1:], 1):
+                def grab(label):
+                    idx = chunk.find("<b>" + label + "</b>")
+                    if idx == -1:
+                        return ""
+                    after = chunk[idx:]
+                    m = re.search(r'margin-right:0\.5%["\x27]?>(.*?)</div>', after, re.DOTALL)
+                    return re.sub(r'<[^>]+>', ' ', m.group(1)).strip() if m else ""
+                name_m = re.search(r'margin-right:0\.5%["\x27]?>(.*?)</div>', chunk, re.DOTALL)
+                name = re.sub(r'<[^>]+>', ' ', name_m.group(1)).strip() if name_m else ""
+                if not name or len(name) < 3:
+                    continue
+                proj_num = grab("Project Number:")
+                location = grab("Project Location:")
+                agency = grab("Agency/Owner:")
+                cost_range = grab("Construction Cost Range:")
+                desc_text = ""
+                dp = re.search(r'<p>(.*?)</p>', chunk, re.DOTALL)
+                if dp:
+                    desc_text = re.sub(r'<[^>]+>', ' ', dp.group(1)).strip()
+                ext_id = proj_num or f"scbo-{date_str}-{i}"
+                full_desc = f"{name}. {desc_text}. Cost: {cost_range}".strip()
+                cat = classify_project(name, full_desc)
+                ms = 50  # scored dynamically per-user at request time
+                value = None
+                val_m = re.findall(r'\$([\d,]+)', cost_range)
+                if val_m:
+                    try:
+                        value = int(val_m[-1].replace(',', ''))
+                    except (ValueError, IndexError):
+                        pass
+                loc_str = location or "South Carolina"
+                geo_query = f"{loc_str}, South Carolina, USA" if loc_str != "South Carolina" else "Columbia, South Carolina, USA"
+                coords = await geocode(geo_query)
+                results.append({
+                    "source_id": "scbo", "external_id": ext_id,
+                    "title": _clean_text(name, 500),
+                    "description": _clean_text(full_desc, 1000),
+                    "location": loc_str,
+                    "latitude": coords[0] if coords else None,
+                    "longitude": coords[1] if coords else None,
+                    "value": value, "category": cat, "match_score": ms,
+                    "status": "Accepting Bids",
+                    "posted_date": _parse_date(date_str),
+                    "agency": _clean_text(agency, 255),
+                    "solicitation_number": proj_num,
+                    "source_url": url,
+                    "raw_data": {"project_number": proj_num, "cost_range": cost_range},
+                })
         except Exception as e:
             logger.error(f"SCBO error for {date_str}: {e}")
     seen = set()

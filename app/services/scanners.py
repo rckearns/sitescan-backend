@@ -376,13 +376,18 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
 
 async def _fetch_scbo_html(url: str) -> str:
     """Fetch SCBO page HTML, routing through ZenRows proxy when key is configured."""
-    from app.config import get_settings
-    settings = get_settings()
-    if settings.zenrows_api_key:
+    import os
+    # Read directly from env to bypass any lru_cache staleness
+    zenrows_key = os.environ.get("ZENROWS_API_KEY", "")
+    if not zenrows_key:
+        from app.config import get_settings
+        zenrows_key = get_settings().zenrows_api_key
+    if zenrows_key:
+        logger.info(f"SCBO fetch via ZenRows: {url}")
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(
                 "https://api.zenrows.com/v1/",
-                params={"apikey": settings.zenrows_api_key, "url": url},
+                params={"apikey": zenrows_key, "url": url},
             )
             resp.raise_for_status()
             return resp.text

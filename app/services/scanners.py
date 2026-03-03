@@ -234,14 +234,22 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
             feats21 = data21.get("features", [])
             logger.info(f"ArcGIS Layer 20: {len(feats20)} features, Layer 21: {len(feats21)} features")
 
-            # Merge and deduplicate by PMPERMITID (Layer 20 takes precedence for duplicates)
+            # Merge and deduplicate by PMPERMITID then PERMIT_NUMBER (Layer 20 takes precedence).
+            # Some records have an empty PMPERMITID; PERMIT_NUMBER is a reliable fallback
+            # to prevent the same physical permit from appearing twice (once per layer).
             seen_pids: set[str] = set()
+            seen_pnums: set[str] = set()
             features = []
             for f in feats20 + feats21:
-                pid = str(f.get("attributes", {}).get("PMPERMITID") or "")
-                if pid and pid in seen_pids:
+                attrs = f.get("attributes", {})
+                pid = str(attrs.get("PMPERMITID") or "")
+                pnum = str(attrs.get("PERMIT_NUMBER") or "")
+                if (pid and pid in seen_pids) or (pnum and pnum in seen_pnums):
                     continue
-                seen_pids.add(pid)
+                if pid:
+                    seen_pids.add(pid)
+                if pnum:
+                    seen_pnums.add(pnum)
                 features.append(f)
             logger.info(f"Charleston ArcGIS combined: {len(features)} unique permits")
 
@@ -329,7 +337,11 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                 lat = a.get("LATITUDE") or (feature.get("geometry", {}) or {}).get("y")
                 lng = a.get("LONGITUDE") or (feature.get("geometry", {}) or {}).get("x")
 
-                ext_id = str(a.get("OBJECTID") or a.get("PERMIT_NUMBER") or hash(title))
+                # Prefer PERMIT_NUMBER over OBJECTID: PERMIT_NUMBER is the same across
+                # Layer 20 and Layer 21 for the same physical permit, so using it as the
+                # external_id prevents duplicate DB rows when the same permit appears in
+                # both layers (e.g. after the PMPERMITID-based dedup passes it through).
+                ext_id = str(a.get("PERMIT_NUMBER") or a.get("OBJECTID") or abs(hash(title)))
                 cat = "trade-permit" if is_trade_permit else classify_project(title, full_desc)
 
                 pmpermitid = str(a.get("PMPERMITID") or "")

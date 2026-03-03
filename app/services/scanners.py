@@ -201,12 +201,10 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
         "f": "json",
         "outSR": "4326",
     }
-    # Layer 21: new construction since 2010 — include Issued AND Finaled/Completed projects.
-    # This layer is specifically curated for significant large projects (e.g. Emanuel Nine Memorial,
-    # 310 Broad St). Finaled permits are still valuable for contractor intelligence: even if the
-    # project is complete, knowing which contractors (Balfour, Haddigan) worked on it is useful.
+    # Layer 21: new construction since 2010 (Emanuel Nine Memorial, 310 Broad St, etc.)
+    # Keep this filter narrow — broader queries may exceed the layer's maxRecordCount.
     layer21_params = {
-        "where": "PERMIT_STATUS <> 'Void' AND PERMIT_STATUS <> 'Cancelled'",
+        "where": "PERMIT_STATUS = 'Issued'",
         "outFields": "*",
         "resultRecordCount": "5000",
         "f": "json",

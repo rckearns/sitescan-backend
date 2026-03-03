@@ -187,14 +187,31 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
 
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
 
-                # Skip non-construction permit types
-                _NON_CONSTRUCTION = {"operational permit", "zoning verification letter"}
-                if permit_type.lower() in _NON_CONSTRUCTION:
+                # Skip permit types that are not GC / sitework / demolition work
+                _SKIP_PERMIT_RE = re.compile(
+                    r"operational\s+permit|zoning\s+verification|fire\s+protection|"
+                    r"fire\s+alarm|electrical|plumbing|mechanical|gas\s+pipe|"
+                    r"low\s+voltage|sign\s+permit|temporary\s+use|"
+                    r"short[\s-]*term\s+rental",
+                    re.IGNORECASE,
+                )
+                if _SKIP_PERMIT_RE.search(permit_type):
                     continue
 
                 address = str(a.get("PERMIT_ADDRESS_LINE1") or a.get("ADDRESS") or "")
                 description = _clean_text(a.get("DESCRIPTION"))
                 work_class = str(a.get("WORK_CLASS") or "")
+
+                # Skip trade-specific work that files under a building permit type
+                _SKIP_DESC_RE = re.compile(
+                    r"^(fire\s+suppression|fire\s+alarm|fire\s+sprinkler|sprinkler\s+system|"
+                    r"fire\s+protection|low\s+voltage|security\s+alarm|short[\s-]*term\s+rental)",
+                    re.IGNORECASE,
+                )
+                if _SKIP_DESC_RE.search(description):
+                    continue
+                if _SKIP_DESC_RE.search(work_class):
+                    continue
 
                 # Build a human-readable title from description or work_class.
                 # "Building Commercial" is a permit-type code, not a useful title.

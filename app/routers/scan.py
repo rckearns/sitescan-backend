@@ -64,18 +64,27 @@ async def test_connectivity(user: User = Depends(get_current_user)):
 
     # Test SCBO (uses same path as the scanner — ZenRows if key set, else curl-cffi)
     try:
+        import os as _os
+        import re as _re
         from app.services.scanners import _fetch_scbo_html
-        from app.config import get_settings as _gs
-        _settings = _gs()
+        _zenrows_key = _os.environ.get("ZENROWS_API_KEY", "")
         today = datetime.utcnow()
         date_str = f"{today.year}-{today.month:02d}-{today.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
         html = await _fetch_scbo_html(url)
+        # Count how many project names the parser can actually extract (not just markers)
+        parsed_names = 0
+        for chunk in html.split("<b>Project Name:</b>")[1:]:
+            m = _re.search(r'margin-right:0\.5%["\']?>(.*?)</div>', chunk, _re.DOTALL)
+            name = _re.sub(r'<[^>]+>', ' ', m.group(1)).strip() if m else ""
+            if name and len(name) >= 3:
+                parsed_names += 1
         results["scbo"] = {
-            "via_zenrows": bool(_settings.zenrows_api_key),
+            "via_zenrows": bool(_zenrows_key),
             "response_bytes": len(html),
             "has_project_markers": "<b>Project Name:</b>" in html,
-            "project_count": html.count("<b>Project Name:</b>"),
+            "raw_marker_count": html.count("<b>Project Name:</b>"),
+            "parsed_project_count": parsed_names,
             "preview": html[:400],
         }
     except Exception as e:

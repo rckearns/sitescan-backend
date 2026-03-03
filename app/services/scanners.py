@@ -99,9 +99,15 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
 
 
 async def scan_charleston_permits(arcgis_url="", record_count=500):
-    """Fetch permits from Charleston ArcGIS. Field names:
-    OBJECTID, DESCRIPTION, PERMIT_NUMBER, PERMIT_TYPE, WORK_CLASS,
-    PERMIT_STATUS, ISSUE_DATE, VALUATION, ADDRESS, CONTRACTOR, LATITUDE, LONGITUDE
+    """Fetch permits from Charleston ArcGIS (External/Applications/MapServer/20).
+    Actual field names (verified 2026-03):
+    OBJECTID, PMPERMITID, PERMIT_NUMBER, PERMIT_TYPE, WORK_CLASS,
+    PERMIT_STATUS, DESCRIPTION, APPLICATION_DATE, ISSUE_DATE, ISSUE_YEAR,
+    EXPIRATION_DATE, FINALED_DATE, LAST_INSPECTION_DATE, SQUARE_FEET, VALUATION,
+    DISTRICT, PROJECT, MAIN_PARCEL_NUMBER, PERMIT_ADDRESS_LINE1, PERMIT_ADDRESS_LINE2,
+    PARCELADDR_LINE1, PARCELADDR_LINE2, ZIPCODE, MAIN_ZONE, ASSIGNED_TO,
+    TOTAL_FEE_AMOUNT, GISADDRESSID, PASSEDFINAL, FLD_ZONE, Station, StationZon, BATTALION
+    NOTE: No CONTRACTOR field is exposed by this layer.
     """
     if not arcgis_url:
         arcgis_url = (
@@ -129,13 +135,12 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                 a = feature.get("attributes", {})
 
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
-                address = str(a.get("ADDRESS") or "")
+                address = str(a.get("PERMIT_ADDRESS_LINE1") or a.get("ADDRESS") or "")
                 description = _clean_text(a.get("DESCRIPTION"))
-                contractor = _clean_text(a.get("CONTRACTOR"), 255)
                 work_class = str(a.get("WORK_CLASS") or "")
 
                 title = f"{permit_type} — {address}" if address else permit_type
-                full_desc = f"{description} {work_class} {contractor}".strip()
+                full_desc = f"{description} {work_class}".strip()
 
                 value = None
                 for vfield in ("VALUATION", "JOBVALUE"):
@@ -178,7 +183,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                     "status": str(a.get("PERMIT_STATUS") or "Active"),
                     "posted_date": posted,
                     "permit_number": str(a.get("PERMIT_NUMBER") or ""),
-                    "contractor": contractor,
+                    "contractor": "",
                     "source_url": "https://gis.charleston-sc.gov/interactive/permits/",
                     "raw_data": a,
                 })

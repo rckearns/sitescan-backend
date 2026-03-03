@@ -50,6 +50,9 @@ async def upsert_projects(session: AsyncSession, projects: list[dict]) -> tuple[
                     existing.longitude = proj["longitude"]
                 if proj.get("contractor"):
                     existing.contractor = proj["contractor"]
+                if proj.get("address"):
+                    existing.address = proj["address"]
+                    existing.location = f"{proj['address']}, Charleston, SC"
             else:
                 # Insert new
                 new_proj = Project(

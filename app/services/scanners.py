@@ -6,7 +6,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 import httpx
-from curl_cffi.requests import AsyncSession as CurlSession
+try:
+    from curl_cffi.requests import AsyncSession as CurlSession
+    _CURL_CFFI_AVAILABLE = True
+except ImportError:
+    CurlSession = None
+    _CURL_CFFI_AVAILABLE = False
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.services.scoring import classify_project
@@ -374,10 +379,21 @@ async def scan_scbo():
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
         try:
-            async with CurlSession(impersonate="chrome120") as client:
+            if _CURL_CFFI_AVAILABLE:
+                client_ctx = CurlSession(impersonate="chrome120")
+            else:
+                logger.warning("curl-cffi not available, falling back to httpx for SCBO")
+                client_ctx = httpx.AsyncClient(
+                    timeout=30.0, follow_redirects=True, verify=False,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"},
+                )
+            async with client_ctx as client:
                 resp = await client.get(url, timeout=30)
                 resp.raise_for_status()
                 html = resp.text
+                logger.info(f"SCBO {date_str}: response {len(html)} bytes, status {resp.status_code}, curl_cffi={_CURL_CFFI_AVAILABLE}")
+                if "<b>Project Name:</b>" not in html:
+                    logger.warning(f"SCBO {date_str}: no project markers found — possible Cloudflare block. First 300 chars: {html[:300]!r}")
                 chunks = html.split("<b>Project Name:</b>")
                 for i, chunk in enumerate(chunks[1:], 1):
                     def grab(label):

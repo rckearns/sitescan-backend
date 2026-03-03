@@ -145,31 +145,17 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
 
 
 async def scan_charleston_permits(arcgis_url="", record_count=500):
-    """Fetch permits from Charleston ArcGIS (External/Applications/MapServer/20),
-    then enrich each record with contractor name via the EnerGov CSS API.
+    """Fetch permits from Charleston ArcGIS layers 20 and 21, then enrich with EnerGov.
 
-    Actual ArcGIS field names (verified 2026-03):
-    OBJECTID, PMPERMITID, PERMIT_NUMBER, PERMIT_TYPE, WORK_CLASS,
-    PERMIT_STATUS, DESCRIPTION, APPLICATION_DATE, ISSUE_DATE, ISSUE_YEAR,
-    EXPIRATION_DATE, FINALED_DATE, LAST_INSPECTION_DATE, SQUARE_FEET, VALUATION,
-    DISTRICT, PROJECT, MAIN_PARCEL_NUMBER, PERMIT_ADDRESS_LINE1, PERMIT_ADDRESS_LINE2,
-    PARCELADDR_LINE1, PARCELADDR_LINE2, ZIPCODE, MAIN_ZONE, ASSIGNED_TO,
-    TOTAL_FEE_AMOUNT, GISADDRESSID, PASSEDFINAL, FLD_ZONE, Station, StationZon, BATTALION
+    Layer 20 (Active Permits): current issued/applied permits of all types.
+    Layer 21 (New Construction since 2010): large multi-year projects (e.g. 310 Broad St,
+      Emanuel Nine Memorial) that may not appear in Layer 20.
+
+    Both layers share the same field schema. Results are deduplicated by PMPERMITID.
     """
-    if not arcgis_url:
-        arcgis_url = (
-            "https://gis.charleston-sc.gov/arcgis2/rest/services/"
-            "External/Applications/MapServer/20/query"
-        )
+    _ARCGIS_BASE = "https://gis.charleston-sc.gov/arcgis2/rest/services/External/Applications/MapServer"
 
-    # Filter by permit TYPE rather than date/status ordering.
-    # This ensures we get ALL permits of the relevant types regardless of when they were issued,
-    # avoiding the date-cutoff problem that hides older active projects.
-    # Trade permit types (Electrical, Roofing, Plumbing, etc.) are included so their
-    # contractors appear in the contractor list; they get category="trade-permit" and
-    # are filtered from the project list API.
-    # Actual Charleston status values: Issued, Completed, Applied, Applied Online,
-    # Needs Review, Under Review  (no "Finaled" — that's "Completed" here)
+    # Layer 20: current active permits, filtered by relevant type
     _GC_PERMIT_TYPES = (
         "Building Commercial",
         "Building Multi-Family",
@@ -188,23 +174,50 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
     )
     _all_types = _GC_PERMIT_TYPES + _TRADE_PERMIT_TYPES
     type_in = ", ".join(f"'{t}'" for t in _all_types)
-    params = {
+
+    layer20_params = {
         "where": f"PERMIT_TYPE IN ({type_in}) AND PERMIT_STATUS NOT IN ('Void', 'Cancelled')",
         "outFields": "*",
         "resultRecordCount": "5000",
         "f": "json",
-        "outSR": "4326",   # return geometry as WGS84 lat/lng (default is SC State Plane ft)
+        "outSR": "4326",
     }
+    # Layer 21: new construction since 2010 — only "Issued" (still-active) projects
+    # No type filter needed: this layer only contains significant new construction
+    layer21_params = {
+        "where": "PERMIT_STATUS = 'Issued'",
+        "outFields": "*",
+        "resultRecordCount": "5000",
+        "f": "json",
+        "outSR": "4326",
+    }
+
     results = []
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(arcgis_url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Fetch both layers concurrently
+            resp20, resp21 = await asyncio.gather(
+                client.get(f"{_ARCGIS_BASE}/20/query", params=layer20_params),
+                client.get(f"{_ARCGIS_BASE}/21/query", params=layer21_params),
+            )
+            resp20.raise_for_status()
+            resp21.raise_for_status()
 
-            features = data.get("features", [])
-            logger.info(f"Charleston ArcGIS returned {len(features)} features")
+            feats20 = resp20.json().get("features", [])
+            feats21 = resp21.json().get("features", [])
+            logger.info(f"ArcGIS Layer 20: {len(feats20)} features, Layer 21: {len(feats21)} features")
+
+            # Merge and deduplicate by PMPERMITID (Layer 20 takes precedence for duplicates)
+            seen_pids: set[str] = set()
+            features = []
+            for f in feats20 + feats21:
+                pid = str(f.get("attributes", {}).get("PMPERMITID") or "")
+                if pid and pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                features.append(f)
+            logger.info(f"Charleston ArcGIS combined: {len(features)} unique permits")
 
             # Build permit records from ArcGIS data
             raw_records = []

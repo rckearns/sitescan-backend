@@ -268,12 +268,18 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                 # Build a human-readable title from description or work_class.
                 # "Building Commercial" is a permit-type code, not a useful title.
                 raw_desc = description.strip()
-                if raw_desc and len(raw_desc) <= 120:
+                if raw_desc:
                     # Convert ALL-CAPS descriptions to Title Case
                     alpha_chars = [c for c in raw_desc if c.isalpha()]
                     if alpha_chars and sum(c.isupper() for c in alpha_chars) / len(alpha_chars) > 0.7:
                         raw_desc = raw_desc.title()
-                    title_base = raw_desc
+                    if len(raw_desc) <= 160:
+                        title_base = raw_desc
+                    else:
+                        # Truncate long descriptions at a word boundary so we keep
+                        # key project names (e.g. "Emanuel Nine Memorial Project")
+                        # rather than falling back to the generic work_class value.
+                        title_base = raw_desc[:160].rsplit(" ", 1)[0].rstrip(":,;") + "…"
                 elif work_class:
                     title_base = work_class
                 else:

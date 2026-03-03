@@ -83,7 +83,7 @@ class Project(Base):
     solicitation_number = Column(String(100), default="")
     naics_code = Column(Text, default="")             # can be comma-separated list
     permit_number = Column(String(100), default="")
-    contractor = Column(String(255), default="")
+    contractor = Column(Text, default="")
     source_url = Column(String(500), default="")
     
     # Raw JSON from source for future use

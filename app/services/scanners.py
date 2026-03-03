@@ -201,10 +201,12 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
         "f": "json",
         "outSR": "4326",
     }
-    # Layer 21: new construction since 2010 — only "Issued" (still-active) projects
-    # No type filter needed: this layer only contains significant new construction
+    # Layer 21: new construction since 2010 — include Issued AND Finaled/Completed projects.
+    # This layer is specifically curated for significant large projects (e.g. Emanuel Nine Memorial,
+    # 310 Broad St). Finaled permits are still valuable for contractor intelligence: even if the
+    # project is complete, knowing which contractors (Balfour, Haddigan) worked on it is useful.
     layer21_params = {
-        "where": "PERMIT_STATUS = 'Issued'",
+        "where": "PERMIT_STATUS NOT IN ('Void', 'Cancelled')",
         "outFields": "*",
         "resultRecordCount": "5000",
         "f": "json",
@@ -413,8 +415,10 @@ async def scan_scbo():
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
         try:
+            import os as _os
             html = await _fetch_scbo_html(url)
-            logger.info(f"SCBO {date_str}: {len(html)} bytes, zenrows={'yes' if settings.zenrows_api_key else 'no'}")
+            _zr = bool(_os.environ.get("ZENROWS_API_KEY", "") or settings.zenrows_api_key)
+            logger.info(f"SCBO {date_str}: {len(html)} bytes, zenrows={'yes' if _zr else 'no'}")
             if "<b>Project Name:</b>" not in html:
                 logger.warning(f"SCBO {date_str}: no project markers — block/empty. First 200: {html[:200]!r}")
             chunks = html.split("<b>Project Name:</b>")

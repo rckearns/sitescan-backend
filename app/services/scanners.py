@@ -190,8 +190,21 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                 description = _clean_text(a.get("DESCRIPTION"))
                 work_class = str(a.get("WORK_CLASS") or "")
 
-                title = f"{permit_type} — {address}" if address else permit_type
-                full_desc = f"{description} {work_class}".strip()
+                # Build a human-readable title from description or work_class.
+                # "Building Commercial" is a permit-type code, not a useful title.
+                raw_desc = description.strip()
+                if raw_desc and len(raw_desc) <= 120:
+                    # Convert ALL-CAPS descriptions to Title Case
+                    alpha_chars = [c for c in raw_desc if c.isalpha()]
+                    if alpha_chars and sum(c.isupper() for c in alpha_chars) / len(alpha_chars) > 0.7:
+                        raw_desc = raw_desc.title()
+                    title_base = raw_desc
+                elif work_class:
+                    title_base = work_class
+                else:
+                    title_base = permit_type
+                title = f"{title_base} — {address}" if address else title_base
+                full_desc = f"{description} | {work_class} | {permit_type}".strip(" |")
 
                 value = None
                 for vfield in ("VALUATION", "JOBVALUE"):

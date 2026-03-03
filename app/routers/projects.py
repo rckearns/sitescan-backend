@@ -1,5 +1,6 @@
 """Projects endpoints — list, filter, search, save, and manage opportunities."""
 
+import statistics
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -12,7 +13,8 @@ import httpx
 from app.models.database import Project, SavedProject, ScanLog, get_db, User
 from app.models.schemas import (
     ProjectOut, ProjectListResponse, SaveProjectRequest,
-    SavedProjectOut,
+    SavedProjectOut, SubcontractorProjectOut, SubcontractorOut,
+    SubcontractorListResponse,
 )
 from app.auth import get_current_user
 from app.services.scoring import score_against_profile
@@ -189,6 +191,102 @@ async def map_parcels(
             return Response(content=resp.content, media_type="application/geo+json")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"ArcGIS request failed: {e}")
+
+
+@router.get("/subcontractors", response_model=SubcontractorListResponse)
+async def list_subcontractors(
+    source: Optional[str] = Query(None, description="Filter by source_id (e.g. charleston-permits)"),
+    category: Optional[str] = Query(None, description="Filter by trade category"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List all contractors with their full project portfolios, total scope value,
+    and median project size. Sorted by total scope value descending."""
+    conditions = [
+        Project.is_active == True,
+        Project.contractor != "",
+        Project.contractor.is_not(None),
+    ]
+    if source:
+        conditions.append(Project.source_id == source)
+    if category:
+        conditions.append(Project.category == category)
+
+    result = await db.execute(select(Project).where(and_(*conditions)))
+    projects = result.scalars().all()
+
+    contractor_map: dict[str, list] = {}
+    for p in projects:
+        name = (p.contractor or "").strip()
+        if not name:
+            continue
+        contractor_map.setdefault(name, []).append(p)
+
+    subcontractors = []
+    for name, projs in contractor_map.items():
+        values = [p.value for p in projs if p.value]
+        subcontractors.append(SubcontractorOut(
+            name=name,
+            project_count=len(projs),
+            total_scope_value=sum(values),
+            median_project_value=statistics.median(values) if values else None,
+            projects=[SubcontractorProjectOut.model_validate(p) for p in projs],
+        ))
+
+    subcontractors.sort(key=lambda x: x.total_scope_value, reverse=True)
+    return SubcontractorListResponse(
+        total_subcontractors=len(subcontractors),
+        subcontractors=subcontractors,
+    )
+
+
+@router.get("/subcontractors/by-trade")
+async def subcontractors_by_trade(
+    source: str = Query("charleston-permits", description="Source to analyze"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List contractors grouped by trade/category.
+
+    Defaults to charleston-permits. Each trade bucket lists its contractors
+    sorted by total scope value descending, with individual project details,
+    total scope value, and median project size per contractor.
+    """
+    result = await db.execute(
+        select(Project).where(
+            Project.is_active == True,
+            Project.source_id == source,
+            Project.contractor != "",
+            Project.contractor.is_not(None),
+        )
+    )
+    projects = result.scalars().all()
+
+    # Build trade → contractor → [projects] map
+    trade_map: dict[str, dict[str, list]] = {}
+    for p in projects:
+        name = (p.contractor or "").strip()
+        if not name:
+            continue
+        trade = p.category or "unknown"
+        trade_map.setdefault(trade, {}).setdefault(name, []).append(p)
+
+    trades: dict[str, list] = {}
+    for trade, contractor_map in sorted(trade_map.items()):
+        subs = []
+        for name, projs in contractor_map.items():
+            values = [p.value for p in projs if p.value]
+            subs.append({
+                "name": name,
+                "project_count": len(projs),
+                "total_scope_value": sum(values),
+                "median_project_value": statistics.median(values) if values else None,
+                "projects": [SubcontractorProjectOut.model_validate(p) for p in projs],
+            })
+        subs.sort(key=lambda x: x["total_scope_value"], reverse=True)
+        trades[trade] = subs
+
+    return {"source": source, "trades": trades}
 
 
 @router.get("/{project_id}", response_model=ProjectOut)

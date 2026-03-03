@@ -186,6 +186,12 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                 a = feature.get("attributes", {})
 
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
+
+                # Skip non-construction permit types
+                _NON_CONSTRUCTION = {"operational permit", "zoning verification letter"}
+                if permit_type.lower() in _NON_CONSTRUCTION:
+                    continue
+
                 address = str(a.get("PERMIT_ADDRESS_LINE1") or a.get("ADDRESS") or "")
                 description = _clean_text(a.get("DESCRIPTION"))
                 work_class = str(a.get("WORK_CLASS") or "")

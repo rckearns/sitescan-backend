@@ -47,6 +47,9 @@ async def list_projects(
     if active_only:
         conditions.append(Project.is_active == True)
 
+    # Residential permits are not relevant to this tool — always exclude
+    conditions.append(Project.category != "residential")
+
     if categories:
         cat_list = [c.strip() for c in categories.split(",")]
         conditions.append(Project.category.in_(cat_list))
@@ -126,6 +129,7 @@ async def map_points(
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
+            Project.category != "residential",
             Project.latitude.is_not(None),
             Project.longitude.is_not(None),
         )
@@ -210,7 +214,12 @@ async def project_stats(
 ):
     """Get summary statistics computed against the user's scoring criteria."""
     # Fetch all active projects and score dynamically
-    result = await db.execute(select(Project).where(Project.is_active == True))
+    result = await db.execute(
+        select(Project).where(
+            Project.is_active == True,
+            Project.category != "residential",
+        )
+    )
     projects = result.scalars().all()
 
     scores = [score_against_profile(p, user) for p in projects]

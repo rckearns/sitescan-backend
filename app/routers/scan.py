@@ -90,6 +90,36 @@ async def test_connectivity(user: User = Depends(get_current_user)):
     except Exception as e:
         results["scbo"] = {"error": str(e)}
 
+    # Test ArcGIS — Layer 20 (active permits) and Layer 21 (new construction since 2010)
+    try:
+        _ARCGIS_BASE = "https://gis.charleston-sc.gov/arcgis2/rest/services/External/Applications/MapServer"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r20, r21 = await asyncio.gather(
+                client.get(f"{_ARCGIS_BASE}/20/query", params={
+                    "where": "PERMIT_TYPE = 'Building Commercial' AND PERMIT_STATUS NOT IN ('Void','Cancelled')",
+                    "outFields": "OBJECTID", "resultRecordCount": "5", "f": "json",
+                }),
+                client.get(f"{_ARCGIS_BASE}/21/query", params={
+                    "where": "PERMIT_STATUS <> 'Void' AND PERMIT_STATUS <> 'Cancelled'",
+                    "outFields": "OBJECTID,PERMIT_STATUS", "resultRecordCount": "5", "f": "json",
+                }),
+            )
+        d20 = r20.json()
+        d21 = r21.json()
+        results["arcgis"] = {
+            "layer20_status": r20.status_code,
+            "layer20_features": len(d20.get("features", [])),
+            "layer20_error": d20.get("error"),
+            "layer21_status": r21.status_code,
+            "layer21_features": len(d21.get("features", [])),
+            "layer21_error": d21.get("error"),
+            "layer21_sample_statuses": [
+                f.get("attributes", {}).get("PERMIT_STATUS") for f in d21.get("features", [])
+            ],
+        }
+    except Exception as e:
+        results["arcgis"] = {"error": str(e)}
+
     # Test EnerGov with 110 Calhoun (Emanuel Nine Memorial)
     try:
         pmpermitid = "47738947-fc93-440c-8b9e-4e3dc68b45cc"

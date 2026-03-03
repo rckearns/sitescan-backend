@@ -136,16 +136,17 @@ async def run_source_scan(
                     projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
 
             elif source_id == "charleston-permits":
-                # Pre-mark all existing charleston permits inactive so that
-                # permits no longer returned by the scanner (e.g. newly-filtered
-                # types) are automatically cleaned up.
-                await session.execute(
-                    update(Project)
-                    .where(Project.source_id == "charleston-permits")
-                    .where(Project.is_active == True)
-                    .values(is_active=False)
-                )
                 projects = await scan_charleston_permits(arcgis_url=settings.charleston_arcgis_url)
+                # Only pre-clear if the scanner returned a meaningful result set.
+                # If ArcGIS failed and returned [], skipping the pre-clear preserves
+                # the existing active permits rather than wiping the database.
+                if len(projects) > 50:
+                    await session.execute(
+                        update(Project)
+                        .where(Project.source_id == "charleston-permits")
+                        .where(Project.is_active == True)
+                        .values(is_active=False)
+                    )
 
             elif source_id == "scbo":
                 today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)

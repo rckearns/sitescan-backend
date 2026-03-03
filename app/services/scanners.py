@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 import httpx
+from curl_cffi.requests import AsyncSession as CurlSession
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.services.scoring import classify_project
@@ -124,7 +125,7 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
         resp = await client.get(
             _ENERGOV_PERMIT_URL.format(pmpermitid),
             headers=_ENERGOV_TENANT_HEADERS,
-            timeout=10.0,
+            timeout=30.0,
         )
         if resp.status_code != 200:
             return ""
@@ -337,7 +338,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
 
             # Concurrently enrich with contractor names from EnerGov
             # Use a semaphore to limit concurrent requests (avoid hammering the server)
-            semaphore = asyncio.Semaphore(15)
+            semaphore = asyncio.Semaphore(8)
 
             async def fetch_with_semaphore(pid):
                 async with semaphore:
@@ -373,8 +374,8 @@ async def scan_scbo():
         date_str = f"{d.year}-{d.month:02d}-{d.day:02d}"
         url = f"https://scbo.sc.gov/online-edition?c=3-{date_str}"
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, verify=False, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.5"}) as client:
-                resp = await client.get(url)
+            async with CurlSession(impersonate="chrome120") as client:
+                resp = await client.get(url, timeout=30)
                 resp.raise_for_status()
                 html = resp.text
                 chunks = html.split("<b>Project Name:</b>")

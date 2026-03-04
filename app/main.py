@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
-from app.models.database import init_db
+from app.models.database import init_db, get_session_factory
 from app.routers import auth_router, projects_router, scan_router, contractors_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
@@ -55,6 +55,29 @@ async def lifespan(app: FastAPI):
         logger.info("Database: sqlite (no DATABASE_URL found — ephemeral!)")
     await init_db()
     logger.info("Database ready")
+
+    # Restore any CHS permits that were marked inactive by a failed scan.
+    # On each restart we re-activate them so they remain visible while the
+    # next scan runs and upserts them with fresh last_seen timestamps.
+    try:
+        from datetime import datetime
+        from sqlalchemy import update
+        from app.models.database import Project
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            result = await session.execute(
+                update(Project)
+                .where(Project.source_id == "charleston-permits")
+                .where(Project.is_active == False)
+                .values(is_active=True, last_seen=datetime.utcnow())
+                .returning(Project.id)
+            )
+            restored = len(result.fetchall())
+            await session.commit()
+            if restored:
+                logger.info(f"Startup: restored {restored} inactive CHS permits to active")
+    except Exception as e:
+        logger.warning(f"Startup permit restore failed (non-fatal): {e}")
     
     # Start scheduler
     scheduler.add_job(

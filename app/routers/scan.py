@@ -1,10 +1,11 @@
 """Scan endpoints."""
 import asyncio
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from app.models.database import ScanLog, User, get_db
+from app.models.database import ScanLog, User, Project, get_db
 from app.models.schemas import ScanTriggerResponse, ScanLogOut
 from app.auth import get_current_user
 from app.services.orchestrator import run_full_scan, run_source_scan
@@ -43,6 +44,42 @@ async def trigger_scan(
         message="Scan started — CHS Permits takes ~10-15 min. Check History when complete.",
         scan_id=None,
     )
+
+@router.post("/trigger-permits")
+async def trigger_permits_scan(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Trigger a CHS Permits-only background scan (fast with EnerGov skip)."""
+    settings = get_settings()
+    sam_key = user.sam_gov_api_key or settings.sam_gov_api_key or ""
+    keywords = user.search_keywords or "masonry restoration structural"
+    state = user.search_state or "SC"
+    background_tasks.add_task(
+        _run_scan_background, sam_key, keywords, state, ["charleston-permits"]
+    )
+    return {"message": "CHS Permits scan started"}
+
+
+@router.post("/restore-permits")
+async def restore_permits(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Re-activate all CHS permits that exist in DB but are marked inactive.
+    Use this to recover after a failed scan without re-fetching from ArcGIS."""
+    result = await db.execute(
+        update(Project)
+        .where(Project.source_id == "charleston-permits")
+        .where(Project.is_active == False)
+        .values(is_active=True, last_seen=datetime.utcnow())
+        .returning(Project.id)
+    )
+    restored = len(result.fetchall())
+    await db.commit()
+    return {"restored": restored, "message": f"Re-activated {restored} CHS permits"}
+
 
 @router.get("/history", response_model=list[ScanLogOut])
 async def scan_history(

@@ -1,6 +1,7 @@
 """Data source scanners — fetch opportunities from external APIs and websites."""
 
 import asyncio
+import math
 import re
 import logging
 from datetime import datetime, timedelta
@@ -29,6 +30,17 @@ def _parse_date(date_str):
         except (ValueError, TypeError):
             continue
     return None
+
+
+def _safe_coord(v):
+    """Return float coordinate or None if invalid/NaN/infinite."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError):
+        return None
 
 
 def _clean_text(text, max_len=2000):
@@ -371,8 +383,8 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                     "title": title, "description": full_desc,
                     "location": f"{address}, Charleston, SC" if address else "Charleston, SC",
                     "address": address,
-                    "latitude": float(lat) if lat else None,
-                    "longitude": float(lng) if lng else None,
+                    "latitude": _safe_coord(lat),
+                    "longitude": _safe_coord(lng),
                     "value": value, "category": cat, "match_score": 50,
                     "status": str(a.get("PERMIT_STATUS") or "Active"),
                     "posted_date": posted,
@@ -725,8 +737,8 @@ def _parse_nc_arcgis_feature(feat: dict) -> Optional[dict]:
         "description": _clean_text(desc, 1000),
         "location": f"{address}, North Charleston, SC",
         "address": address,
-        "latitude": geom.get("y"),
-        "longitude": geom.get("x"),
+        "latitude": _safe_coord(geom.get("y")),
+        "longitude": _safe_coord(geom.get("x")),
         "value": value,
         "category": classify_project(desc, desc),
         "match_score": 50,
@@ -885,8 +897,8 @@ def _parse_mtp_feature(feat: dict) -> Optional[dict]:
         "description": _clean_text(desc, 1000),
         "location": f"{address}, Mt. Pleasant, SC",
         "address": address,
-        "latitude": geom.get("y"),
-        "longitude": geom.get("x"),
+        "latitude": _safe_coord(geom.get("y")),
+        "longitude": _safe_coord(geom.get("x")),
         "value": value,
         "category": classify_project(desc, desc),
         "match_score": 50,

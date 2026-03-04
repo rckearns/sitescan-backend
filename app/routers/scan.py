@@ -144,38 +144,50 @@ async def test_connectivity(user: User = Depends(get_current_user)):
     except Exception as e:
         results["energov"] = {"error": str(e)}
 
-    # Test North Charleston ArcGIS PermitCustomers MapServer
+    # Test North Charleston PermitSoftware FeatureServer (portal-proxied)
+    # access=public in portal catalog; returns 403 GWM_0003 until city fixes ACL
     try:
-        nc_arcgis = (
-            "https://arc.northcharleston.org/arcgis/rest/services/Admin/PermitCustomers/MapServer"
+        _nc_fs = (
+            "https://maps.northcharleston.org/portal/sharing/servers/"
+            "f4366ff29734461292ea568e904052fa/rest/services/Permitting/PermitSoftware/FeatureServer"
         )
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            r = await client.get(f"{nc_arcgis}?f=json")
-            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-            results["north_charleston_arcgis"] = {
+            r = await client.get(f"{_nc_fs}?f=json")
+            body = r.json()
+            err = body.get("error", {})
+            results["north_charleston_permits"] = {
                 "status_code": r.status_code,
+                "error_code": err.get("code"),
+                "error_message": err.get("message"),
                 "has_layers": bool(body.get("layers")),
-                "error": body.get("error"),
-                "preview": r.text[:200],
+                "accessible": not bool(err),
             }
     except Exception as e:
-        results["north_charleston_arcgis"] = {"error": str(e)}
+        results["north_charleston_permits"] = {"error": str(e)}
 
-    # Test Mt. Pleasant AGOL search
+    # Test Mt. Pleasant Hub datasets API (AGOL org has no public permit FeatureServers;
+    # Oracle OPAL is the permit system — no public API found)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(
-                "https://gis-tomp.maps.arcgis.com/sharing/rest/search",
-                params={"q": "permit owner:gis-tomp", "num": 5, "f": "json"},
+                "https://gis-tomp.hub.arcgis.com/api/v3/datasets",
+                params={"q": "permit building", "page[size]": 5},
             )
             data = r.json() if r.status_code == 200 else {}
-            results["mt_pleasant_agol"] = {
+            mtp_datasets = [
+                d.get("attributes", {}).get("name")
+                for d in data.get("data", [])
+                if "tomp" in (d.get("attributes", {}).get("orgId") or "").lower()
+                or "mt pleasant" in (d.get("attributes", {}).get("name") or "").lower()
+            ]
+            results["mt_pleasant_hub"] = {
                 "status_code": r.status_code,
-                "total_results": data.get("total", 0),
-                "items": [(i.get("title"), i.get("type")) for i in data.get("results", [])],
+                "total_in_response": len(data.get("data", [])),
+                "tomp_permit_datasets": mtp_datasets,
+                "note": "No public permit FeatureServer found; Oracle OPAL requires SSO",
             }
     except Exception as e:
-        results["mt_pleasant_agol"] = {"error": str(e)}
+        results["mt_pleasant_hub"] = {"error": str(e)}
 
     return results
 

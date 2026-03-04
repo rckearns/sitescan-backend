@@ -544,29 +544,29 @@ async def scan_north_charleston_permits() -> list[dict]:
     """
     results = []
 
-    # ── Step 1: Probe ArcGIS PermitCustomers MapServer (likely 499 Token Required) ──
-    nc_arcgis_base = (
-        "https://arc.northcharleston.org/arcgis/rest/services/Admin/PermitCustomers/MapServer"
+    # ── Step 1: Probe portal-proxied PermitSoftware FeatureServer ──
+    # Data confirmed via CustomerPortal SPA bundle inspection. The portal item is
+    # marked access=public but the underlying service returns 403 GWM_0003 for
+    # anonymous requests. When the city fixes the service-level ACL, this will work.
+    _NC_FS = (
+        "https://maps.northcharleston.org/portal/sharing/servers/"
+        "f4366ff29734461292ea568e904052fa/rest/services/Permitting/PermitSoftware/FeatureServer"
     )
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            probe = await client.get(f"{nc_arcgis_base}?f=json")
+            probe = await client.get(f"{_NC_FS}?f=json")
+            data = probe.json()
+            err = data.get("error", {})
             logger.info(
-                f"NC ArcGIS probe: HTTP {probe.status_code}, "
-                f"preview={probe.text[:300]}"
+                f"NC PermitSoftware FeatureServer: HTTP {probe.status_code}, "
+                f"error={err.get('code')} {err.get('message')}"
             )
-            if probe.status_code == 200:
-                data = probe.json()
-                if data.get("layers") and not data.get("error"):
-                    logger.info(
-                        f"NC ArcGIS: public access! layers="
-                        f"{[(l.get('id'), l.get('name')) for l in data['layers']]}"
-                    )
-                    results = await _query_nc_arcgis(client, nc_arcgis_base, data["layers"])
-                else:
-                    logger.info(f"NC ArcGIS: 200 but error/no layers: {data.get('error')}")
+            if probe.status_code == 200 and not err:
+                layers = data.get("layers", [])
+                logger.info(f"NC FeatureServer: public! layers={[(l['id'], l['name']) for l in layers]}")
+                results = await _query_nc_arcgis(client, _NC_FS, layers)
     except Exception as e:
-        logger.warning(f"NC ArcGIS probe failed: {e}")
+        logger.warning(f"NC FeatureServer probe failed: {e}")
 
     if results:
         return results

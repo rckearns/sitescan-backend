@@ -267,6 +267,20 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 features.append(f)
             logger.info(f"Charleston ArcGIS combined: {len(features)} unique permits")
 
+            # Compiled once outside the loop for efficiency
+            _TRADE_PERMIT_RE = re.compile(
+                r"operational\s+permit|zoning\s+verification|fire\s+protection|"
+                r"fire\s+alarm|electrical|plumbing|mechanical|gas\s+pipe|"
+                r"low\s+voltage|sign\s+permit|temporary\s+use|roofing|"
+                r"short[\s-]*term\s+rental",
+                re.IGNORECASE,
+            )
+            _SKIP_DESC_RE = re.compile(
+                r"^(fire\s+suppression|fire\s+alarm|fire\s+sprinkler|sprinkler\s+system|"
+                r"fire\s+protection|low\s+voltage|security\s+alarm|short[\s-]*term\s+rental)",
+                re.IGNORECASE,
+            )
+
             # Build permit records from ArcGIS data
             raw_records = []
             pmpermitids = []
@@ -276,16 +290,9 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
 
                 # Identify trade permits (electrical, plumbing, mechanical, etc.).
-                # We no longer skip these entirely — we store them with granular trade categories
-                # (electrical, fire-sprinkler, plumbing, mechanical, roofing, trade-permit)
-                # so they contribute to contractor discovery without appearing in the project list.
-                _TRADE_PERMIT_RE = re.compile(
-                    r"operational\s+permit|zoning\s+verification|fire\s+protection|"
-                    r"fire\s+alarm|electrical|plumbing|mechanical|gas\s+pipe|"
-                    r"low\s+voltage|sign\s+permit|temporary\s+use|"
-                    r"short[\s-]*term\s+rental",
-                    re.IGNORECASE,
-                )
+                # Stored with granular trade categories (electrical, fire-sprinkler, plumbing,
+                # mechanical, roofing, trade-permit) for contractor discovery without showing
+                # in the project list.
                 is_trade_permit = bool(_TRADE_PERMIT_RE.search(permit_type))
 
                 address = str(a.get("PERMIT_ADDRESS_LINE1") or a.get("ADDRESS") or "")
@@ -295,11 +302,6 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 # For non-trade building permits, also skip descriptions that are clearly
                 # trade-specific work filed under a generic building permit type
                 if not is_trade_permit:
-                    _SKIP_DESC_RE = re.compile(
-                        r"^(fire\s+suppression|fire\s+alarm|fire\s+sprinkler|sprinkler\s+system|"
-                        r"fire\s+protection|low\s+voltage|security\s+alarm|short[\s-]*term\s+rental)",
-                        re.IGNORECASE,
-                    )
                     if _SKIP_DESC_RE.search(description):
                         continue
                     if _SKIP_DESC_RE.search(work_class):

@@ -79,6 +79,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Startup permit restore failed (non-fatal): {e}")
     
+    # Kick off a CHS Permits background scan so contractor data stays fresh.
+    # Uses the EnerGov-skip optimization — only enriches permits without
+    # contractor data, so this completes in ~2 min instead of 25+ min.
+    async def _startup_permits_scan():
+        try:
+            from app.services.orchestrator import run_full_scan
+            logger.info("Startup: triggering CHS Permits background scan...")
+            await run_full_scan(sources=["charleston-permits"])
+            logger.info("Startup: CHS Permits scan complete")
+        except Exception as e:
+            logger.warning(f"Startup CHS Permits scan failed (non-fatal): {e}")
+
+    asyncio.create_task(_startup_permits_scan())
+
     # Start scheduler
     scheduler.add_job(
         scan_and_alert,

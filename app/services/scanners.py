@@ -163,7 +163,7 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
     return ""
 
 
-async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_permit_numbers: set | None = None):
+async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_permit_numbers: Optional[set] = None):
     """Fetch permits from Charleston ArcGIS layers 20 and 21, then enrich with EnerGov.
 
     Layer 20 (Active Permits): current issued/applied permits of all types.

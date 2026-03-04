@@ -452,8 +452,8 @@ async def parse_pdf(
             raise HTTPException(status_code=400, detail=f"{file.filename}: only PDF files are supported")
 
         contents = await file.read()
-        if len(contents) > 20 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail=f"{file.filename}: file too large (max 20 MB)")
+        if len(contents) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"{file.filename}: file too large (max 50 MB)")
 
         try:
             reader = PdfReader(BytesIO(contents))

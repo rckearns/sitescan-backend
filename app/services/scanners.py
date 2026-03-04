@@ -163,7 +163,7 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
     return ""
 
 
-async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_permit_numbers: Optional[set] = None):
+async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_permit_numbers: Optional[set] = None, max_new_energov_calls: int = 500):
     """Fetch permits from Charleston ArcGIS layers 20 and 21, then enrich with EnerGov.
 
     Layer 20 (Active Permits): current issued/applied permits of all types.
@@ -377,6 +377,13 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
             skipped = len(pmpermitids) - len(pids_to_fetch)
             if skipped:
                 logger.info(f"EnerGov: skipping {skipped} already-enriched permits")
+
+            # Cap EnerGov calls per scan to avoid rate-limiting timeouts.
+            # Unenriched permits are enriched in batches across successive scans.
+            if len(pids_to_fetch) > max_new_energov_calls:
+                deferred = len(pids_to_fetch) - max_new_energov_calls
+                logger.info(f"EnerGov: capping at {max_new_energov_calls} calls this scan ({deferred} deferred to next scan)")
+                pids_to_fetch = pids_to_fetch[:max_new_energov_calls]
 
             semaphore = asyncio.Semaphore(8)
 

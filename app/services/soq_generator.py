@@ -1,12 +1,37 @@
 """SOQ document generator — fills SC OSE Statement of Qualifications template."""
 
 import logging
+import re
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
 logger = logging.getLogger("sitescan.soq")
 
 TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / "soq_template.docx"
+
+
+def _patch_template_rels(template_path: Path) -> BytesIO:
+    """Return a patched copy of the docx with mailto: URLs sanitized.
+
+    docxtpl processes every XML file (including */_rels/*.rels) as a Jinja2
+    template. The '@' in 'mailto:user@example.com' is an invalid Jinja2 token
+    and triggers TemplateSyntaxError. We strip the address from relationship
+    targets before rendering so Jinja2 never sees the '@'.
+    """
+    buf = BytesIO()
+    with zipfile.ZipFile(template_path, "r") as zin:
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.endswith(".rels"):
+                    text = data.decode("utf-8")
+                    # Replace any mailto: hyperlink target that contains '@'
+                    text = re.sub(r'Target="mailto:[^"]*@[^"]*"', 'Target="mailto:"', text)
+                    data = text.encode("utf-8")
+                zout.writestr(item, data)
+    buf.seek(0)
+    return buf
 
 
 def _fmt_value(v) -> str:
@@ -51,7 +76,8 @@ def generate_soq(org, pm, superintendent, general_projects, state_projects) -> b
             "Copy soq_template.docx to app/templates/ and add {{ }} placeholders."
         )
 
-    tpl = DocxTemplate(TEMPLATE_PATH)
+    patched = _patch_template_rels(TEMPLATE_PATH)
+    tpl = DocxTemplate(patched)
 
     context = {
         # Part I — Contractor info

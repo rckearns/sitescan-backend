@@ -201,6 +201,114 @@ class ContractorOut(BaseModel):
         from_attributes = True
 
 
+# ─── PROFILE ─────────────────────────────────────────────────────────────────
+
+class OrgPrincipalIn(BaseModel):
+    name: str = ""
+    title: str = ""
+    other_businesses: str = ""
+    order: int = 0
+
+class OrgPrincipalOut(OrgPrincipalIn):
+    id: int
+    class Config:
+        from_attributes = True
+
+
+class ProjectRefIn(BaseModel):
+    ref_type: str = "general"
+    project_name: str = ""
+    owner_name: str = ""
+    owner_contact: str = ""
+    owner_phone: str = ""
+    contract_value: Optional[float] = None
+    completion_date: str = ""
+    description: str = ""
+    scope_of_work: str = ""
+    your_role: str = ""
+
+class ProjectRefOut(ProjectRefIn):
+    id: int
+    class Config:
+        from_attributes = True
+
+
+class KeyPersonnelIn(BaseModel):
+    name: str = ""
+    role: str = "pm"    # "pm" or "super"
+    resume_summary: str = ""
+    projects: list = []
+
+class KeyPersonnelOut(KeyPersonnelIn):
+    id: int
+    class Config:
+        from_attributes = True
+
+
+class OrgProfileOut(BaseModel):
+    id: int
+    legal_name: str
+    entity_type: str
+    address_street: str
+    address_city: str
+    address_state: str
+    address_zip: str
+    phone: str
+    fax: str
+    email: str
+    website: str
+    contractor_license_number: str
+    license_classifications: list
+    insurance_company: str
+    insurance_agent_name: str
+    insurance_agent_phone: str
+    bonding_company: str
+    bonding_agent_name: str
+    bonding_agent_phone: str
+    bonding_capacity: str
+    emr: str
+    safety_meeting_frequency: str
+    compliance_flags: dict
+    principals: list[OrgPrincipalOut]
+    project_refs: list[ProjectRefOut]
+    personnel: list[KeyPersonnelOut]
+
+    class Config:
+        from_attributes = True
+
+
+class OrgProfileUpdate(BaseModel):
+    legal_name: Optional[str] = None
+    entity_type: Optional[str] = None
+    address_street: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
+    address_zip: Optional[str] = None
+    phone: Optional[str] = None
+    fax: Optional[str] = None
+    email: Optional[str] = None
+    website: Optional[str] = None
+    contractor_license_number: Optional[str] = None
+    license_classifications: Optional[list] = None
+    insurance_company: Optional[str] = None
+    insurance_agent_name: Optional[str] = None
+    insurance_agent_phone: Optional[str] = None
+    bonding_company: Optional[str] = None
+    bonding_agent_name: Optional[str] = None
+    bonding_agent_phone: Optional[str] = None
+    bonding_capacity: Optional[str] = None
+    emr: Optional[str] = None
+    safety_meeting_frequency: Optional[str] = None
+    compliance_flags: Optional[dict] = None
+
+
+class SOQGenerateRequest(BaseModel):
+    pm_id: int
+    super_id: int
+    general_project_ids: list[int]  # up to 3
+    state_project_ids: list[int]    # up to 3
+
+
 # ─── SCAN ────────────────────────────────────────────────────────────────────
 
 class ScanTriggerResponse(BaseModel):

@@ -143,7 +143,11 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
-    return JSONResponse(status_code=500, content={"detail": f"Internal server error: {type(exc).__name__}"})
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {str(exc)[:300]}"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 # Mount routers
@@ -169,4 +173,4 @@ async def root():
         "docs": "/docs",
         "health": "/health",
     }
-# force redeploy Thu Feb 26 09:59:24 EST 2026
+# force redeploy Wed Mar  4 2026

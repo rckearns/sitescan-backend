@@ -163,7 +163,7 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
     return ""
 
 
-async def scan_charleston_permits(arcgis_url="", record_count=500):
+async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_permit_numbers: set | None = None):
     """Fetch permits from Charleston ArcGIS layers 20 and 21, then enrich with EnerGov.
 
     Layer 20 (Active Permits): current issued/applied permits of all types.
@@ -366,18 +366,33 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
                     "raw_data": a,
                 })
 
-            # Concurrently enrich with contractor names from EnerGov
-            # Use a semaphore to limit concurrent requests (avoid hammering the server)
+            # Concurrently enrich with contractor names from EnerGov.
+            # Skip permits already known to have contractor data (passed in from orchestrator)
+            # to avoid re-hammering EnerGov every scan and triggering rate limiting.
+            _skip = skip_energov_permit_numbers or set()
+            pids_to_fetch = [
+                (i, pid) for i, (pid, rec) in enumerate(zip(pmpermitids, raw_records))
+                if pid and rec.get("permit_number") not in _skip
+            ]
+            skipped = len(pmpermitids) - len(pids_to_fetch)
+            if skipped:
+                logger.info(f"EnerGov: skipping {skipped} already-enriched permits")
+
             semaphore = asyncio.Semaphore(8)
 
             async def fetch_with_semaphore(pid):
                 async with semaphore:
                     return await _fetch_energov_contractor(client, pid)
 
-            logger.info(f"Fetching contractor data from EnerGov for {len(pmpermitids)} permits...")
-            contractors = await asyncio.gather(
-                *[fetch_with_semaphore(pid) for pid in pmpermitids]
+            logger.info(f"Fetching contractor data from EnerGov for {len(pids_to_fetch)} permits...")
+            fetched_contractors = await asyncio.gather(
+                *[fetch_with_semaphore(pid) for _, pid in pids_to_fetch]
             )
+
+            # Build full contractors list aligned with raw_records (empty string = preserve DB value)
+            contractors = [""] * len(pmpermitids)
+            for (i, _), contractor in zip(pids_to_fetch, fetched_contractors):
+                contractors[i] = contractor
 
             enriched = sum(1 for c in contractors if c)
             logger.info(f"EnerGov enrichment: {enriched}/{len(pmpermitids)} permits have contractor data")

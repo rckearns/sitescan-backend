@@ -137,7 +137,22 @@ async def run_source_scan(
                     projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
 
             elif source_id == "charleston-permits":
-                projects = await scan_charleston_permits(arcgis_url=settings.charleston_arcgis_url)
+                # Fetch permit numbers that already have contractor data so the scanner
+                # can skip EnerGov for those — avoids re-enriching thousands of known
+                # permits every scan (which causes EnerGov rate-limiting after bulk runs).
+                existing_result = await session.execute(
+                    select(Project.permit_number).where(
+                        Project.source_id == "charleston-permits",
+                        Project.contractor != None,
+                        Project.contractor != "",
+                    )
+                )
+                known_permit_numbers: set[str] = {row[0] for row in existing_result.fetchall() if row[0]}
+                logger.info(f"charleston-permits: {len(known_permit_numbers)} permits already have contractor data, skipping EnerGov for those")
+                projects = await scan_charleston_permits(
+                    arcgis_url=settings.charleston_arcgis_url,
+                    skip_energov_permit_numbers=known_permit_numbers,
+                )
                 # Only pre-clear if the scanner returned a meaningful result set.
                 # If ArcGIS failed and returned [], skipping the pre-clear preserves
                 # the existing active permits rather than wiping the database.

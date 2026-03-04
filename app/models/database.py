@@ -144,6 +144,8 @@ class User(Base):
     # Company profile link
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
 
+    is_active = Column(Boolean, default=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -322,6 +324,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_statuses JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         ]
         for sql in migrations:
             try:

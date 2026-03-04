@@ -192,7 +192,11 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
         "Building Multi-Family",
         "Demolition",
         "Foundation",
+        "Construction Activity Type 1",
         "Construction Activity Type 2",
+        "Construction Activity Type 3",
+        "Retaining Wall - Commercial",
+        "Pool - Commercial",
     )
     _TRADE_PERMIT_TYPES = (
         "Electrical - Commercial",
@@ -202,6 +206,10 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
         "Mechanical",
         "xDNU Mechanical - Commercial",
         "Fire Protection System - Standalone",
+        "Fire Protection System - Subpermit",
+        "Painting",
+        "Fuel Gas",
+        "Fuel Gas - Commercial",
     )
     _all_types = _GC_PERMIT_TYPES + _TRADE_PERMIT_TYPES
     type_in = ", ".join(f"'{t}'" for t in _all_types)
@@ -270,9 +278,9 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
             # Compiled once outside the loop for efficiency
             _TRADE_PERMIT_RE = re.compile(
                 r"operational\s+permit|zoning\s+verification|fire\s+protection|"
-                r"fire\s+alarm|fire\s+suppression|sprinkler|"
-                r"electrical|plumbing|mechanical|gas\s+pipe|"
-                r"low\s+voltage|sign\s+permit|temporary\s+use|roofing|"
+                r"fire\s+alarm|fire\s+suppression|sprinkler|subpermit|"
+                r"electrical|plumbing|mechanical|gas\s+pipe|fuel\s+gas|"
+                r"low\s+voltage|sign\s+permit|temporary\s+use|roofing|painting|"
                 r"short[\s-]*term\s+rental",
                 re.IGNORECASE,
             )
@@ -366,12 +374,14 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                         cat = "fire-sprinkler"
                     elif "electrical" in pt:
                         cat = "electrical"
-                    elif "plumbing" in pt:
+                    elif "plumbing" in pt or "fuel gas" in pt:
                         cat = "plumbing"
                     elif "mechanical" in pt:
                         cat = "mechanical"
                     elif "roofing" in pt:
                         cat = "roofing"
+                    elif "painting" in pt:
+                        cat = "painting"
                     else:
                         cat = "trade-permit"
                 else:

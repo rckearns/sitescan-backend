@@ -78,8 +78,13 @@ async def get_org(
     user: User = Depends(get_current_user),
 ):
     """Get the current user's org profile (auto-creates a blank one if needed)."""
-    org = await _get_or_create_org(user, db)
-    return org
+    try:
+        org = await _get_or_create_org(user, db)
+        return org
+    except Exception as e:
+        import logging as _lg
+        _lg.getLogger("sitescan.profile").error(f"GET /org failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Profile load failed: {type(e).__name__}: {e}")
 
 
 @router.put("/org", response_model=OrgProfileOut)

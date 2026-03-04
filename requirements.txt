@@ -20,3 +20,4 @@ asyncpg
 curl-cffi>=0.7.0
 docxtpl==0.18.0
 anthropic>=0.40.0
+pypdf>=4.0.0

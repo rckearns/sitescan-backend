@@ -2,7 +2,7 @@
 
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -430,3 +430,34 @@ async def bid_assist(
         raise HTTPException(status_code=500, detail=f"Bid assist failed: {e}")
 
     return {"narrative": narrative}
+
+
+@router.post("/bid-assist/parse-pdf")
+async def parse_pdf(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+):
+    """Extract text from an uploaded PDF and return it for use in bid-assist."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        raise HTTPException(status_code=503, detail="pypdf not installed — add it to requirements.txt")
+
+    contents = await file.read()
+    if len(contents) > 20 * 1024 * 1024:  # 20 MB cap
+        raise HTTPException(status_code=413, detail="PDF too large (max 20 MB)")
+
+    try:
+        reader = PdfReader(BytesIO(contents))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        text = "\n\n".join(p.strip() for p in pages if p.strip())
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not parse PDF: {e}")
+
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="No text could be extracted from this PDF (it may be image-only)")
+
+    return {"text": text[:12000]}  # cap at 12k chars — enough for any RFQ

@@ -51,16 +51,13 @@ async def _get_or_create_org(user: User, db: AsyncSession) -> Organization:
     org = Organization()
     db.add(org)
     await db.flush()
-    await db.refresh(org)
 
     user.org_id = org.id
     await db.flush()
 
-    # Return with empty relationship lists
-    org.principals = []
-    org.project_refs = []
-    org.personnel = []
-    return org
+    # Re-load with selectinload so relationships are eagerly loaded —
+    # avoids MissingGreenlet errors when Pydantic serializes them synchronously.
+    return await _load_org(org.id, db)
 
 
 def _assert_org(user: User) -> int:

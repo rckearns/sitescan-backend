@@ -25,6 +25,10 @@ logging.basicConfig(
     format="%(asctime)s | %(name)-25s | %(levelname)-7s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# SQLAlchemy emits one log line per query at INFO level — with 500+ EnerGov
+# calls per scan this floods Railway's 500 log/sec limit and drops app logs.
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 logger = logging.getLogger("sitescan")
 
 # ─── SCHEDULER ───────────────────────────────────────────────────────────────

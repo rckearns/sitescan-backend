@@ -163,7 +163,7 @@ CATEGORY_PATTERNS = [
     ("structural", re.compile(
         r"structur|foundation|reinforc|load[\s-]*bear|steel\s*beam|"
         r"shoring|underpin|seismic|retaining\s*wall|pile|micropile|"
-        r"helical|shotcrete|carbon\s*fiber",
+        r"helical|shotcrete|carbon\s*fiber|demolit",
         re.IGNORECASE,
     )),
     ("government", re.compile(

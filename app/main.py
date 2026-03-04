@@ -129,13 +129,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow frontend access
+# CORS — restrict to known frontend origins
+_ALLOWED_ORIGINS = [
+    "https://www.yabodle.com",
+    "https://yabodle.com",
+    "http://localhost:5173",   # Vite dev server
+    "http://localhost:3000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Global exception handler — ensures unhandled exceptions return JSON with
@@ -166,27 +172,6 @@ async def health():
 
 
 
-@app.get("/health/db")
-async def health_db():
-    """Diagnostic endpoint — checks whether key DB tables/columns exist."""
-    from sqlalchemy import text as _t
-    from app.models.database import get_session_factory
-    results = {}
-    sf = get_session_factory()
-    checks = [
-        ("SELECT COUNT(*) FROM organizations", "organizations_table"),
-        ("SELECT org_id FROM users LIMIT 0", "users_org_id_column"),
-        ("SELECT COUNT(*) FROM users", "users_table"),
-    ]
-    async with sf() as s:
-        for sql, label in checks:
-            try:
-                r = await s.execute(_t(sql))
-                val = r.scalar()
-                results[label] = f"ok ({val})" if val is not None else "ok"
-            except Exception as e:
-                results[label] = f"ERROR: {e}"
-    return results
 
 
 @app.get("/")

@@ -32,14 +32,11 @@ class Settings(BaseSettings):
     # SAM.gov
     sam_gov_api_key: str = ""
 
-    # Notifications
-    smtp_host: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    smtp_user: str = ""
-    smtp_password: str = ""
-    notification_from_email: str = "sitescan@yourdomain.com"
+    # Notifications — Postmark
+    postmark_api_key: str = ""
+    postmark_from_email: str = "alerts@yourdomain.com"
 
-    # Twilio
+    # Twilio (SMS)
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from_number: str = ""

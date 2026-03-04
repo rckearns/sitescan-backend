@@ -77,7 +77,49 @@ async def get_org(
     """Get the current user's org profile (auto-creates a blank one if needed)."""
     try:
         org = await _get_or_create_org(user, db)
-        return org
+        # Build a plain dict to avoid any SQLAlchemy lazy-load / MissingGreenlet
+        # issues when Pydantic synchronously serializes the response model.
+        def _principal(p):
+            return {"id": p.id, "name": p.name or "", "title": p.title or "",
+                    "other_businesses": p.other_businesses or "", "order": p.order or 0}
+        def _ref(r):
+            return {"id": r.id, "ref_type": r.ref_type or "general",
+                    "project_name": r.project_name or "", "owner_name": r.owner_name or "",
+                    "owner_contact": r.owner_contact or "", "owner_phone": r.owner_phone or "",
+                    "contract_value": r.contract_value, "completion_date": r.completion_date or "",
+                    "description": r.description or "", "scope_of_work": r.scope_of_work or "",
+                    "your_role": r.your_role or ""}
+        def _person(k):
+            return {"id": k.id, "name": k.name or "", "role": k.role or "pm",
+                    "resume_summary": k.resume_summary or "", "projects": k.projects or []}
+        return {
+            "id": org.id,
+            "legal_name": org.legal_name or "",
+            "entity_type": org.entity_type or "",
+            "address_street": org.address_street or "",
+            "address_city": org.address_city or "",
+            "address_state": org.address_state or "",
+            "address_zip": org.address_zip or "",
+            "phone": org.phone or "",
+            "fax": org.fax or "",
+            "email": org.email or "",
+            "website": org.website or "",
+            "contractor_license_number": org.contractor_license_number or "",
+            "license_classifications": org.license_classifications or [],
+            "insurance_company": org.insurance_company or "",
+            "insurance_agent_name": org.insurance_agent_name or "",
+            "insurance_agent_phone": org.insurance_agent_phone or "",
+            "bonding_company": org.bonding_company or "",
+            "bonding_agent_name": org.bonding_agent_name or "",
+            "bonding_agent_phone": org.bonding_agent_phone or "",
+            "bonding_capacity": org.bonding_capacity or "",
+            "emr": org.emr or "",
+            "safety_meeting_frequency": org.safety_meeting_frequency or "",
+            "compliance_flags": org.compliance_flags or {},
+            "principals": [_principal(p) for p in (org.principals or [])],
+            "project_refs": [_ref(r) for r in (org.project_refs or [])],
+            "personnel": [_person(k) for k in (org.personnel or [])],
+        }
     except Exception as e:
         import logging as _lg
         _lg.getLogger("sitescan.profile").error(f"GET /org failed: {e}", exc_info=True)

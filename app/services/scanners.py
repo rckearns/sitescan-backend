@@ -202,9 +202,11 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
         "outSR": "4326",
     }
     # Layer 21: new construction since 2010 (Emanuel Nine Memorial, 310 Broad St, etc.)
-    # Keep this filter narrow — broader queries may exceed the layer's maxRecordCount.
+    # Must include Completed/Finaled permits — Layer 21 projects are mostly Completed
+    # (finished buildings), which is exactly what we want for contractor intelligence.
+    # Confirmed via connectivity test: Layer 21 sample statuses are largely Completed.
     layer21_params = {
-        "where": "PERMIT_STATUS = 'Issued'",
+        "where": "PERMIT_STATUS <> 'Void' AND PERMIT_STATUS <> 'Cancelled'",
         "outFields": "*",
         "resultRecordCount": "5000",
         "f": "json",
@@ -410,7 +412,15 @@ async def _fetch_scbo_html(url: str) -> str:
                     params={"apikey": zenrows_key, "url": url},
                 )
                 resp.raise_for_status()
-                return resp.text
+                # SCBO pages are 400KB+. A block/CAPTCHA page is typically <50KB.
+                # If ZenRows returns suspiciously small content, fall through to
+                # curl_cffi/direct so we don't silently accept a block page.
+                if len(resp.text) >= 50_000:
+                    return resp.text
+                logger.warning(
+                    f"ZenRows returned only {len(resp.text)} bytes for {url} "
+                    f"(likely block page) — falling back to curl_cffi/direct"
+                )
         except httpx.HTTPStatusError as e:
             logger.warning(
                 f"ZenRows returned {e.response.status_code} for {url} — "

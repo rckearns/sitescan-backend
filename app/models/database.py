@@ -330,7 +330,22 @@ async def init_db():
             except Exception as e:
                 # Column/type already correct — safe to ignore
                 import logging as _lg
-                _lg.getLogger("sitescan.db").debug(f"Migration skipped ({e.__class__.__name__}): {sql[:60]}")
+                _lg.getLogger("sitescan.db").warning(f"Migration skipped ({e.__class__.__name__}): {sql[:60]}")
+
+    # Startup diagnostics — log whether critical tables/columns exist
+    import logging as _lg
+    _dblog = _lg.getLogger("sitescan.db")
+    if is_postgres:
+        for check_sql, label in [
+            ("SELECT COUNT(*) FROM organizations", "organizations table"),
+            ("SELECT org_id FROM users LIMIT 0", "users.org_id column"),
+        ]:
+            try:
+                async with _engine.begin() as conn:
+                    await conn.execute(text(check_sql))
+                _dblog.info(f"DB check OK: {label}")
+            except Exception as e:
+                _dblog.warning(f"DB check FAILED: {label}: {e}")
 
 
 async def get_db():

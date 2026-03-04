@@ -262,13 +262,17 @@ async def run_full_scan(
                 )
                 logs.append(scan_log)
             
-            # Mark projects not seen recently as inactive
-            await session.execute(
-                update(Project)
-                .where(Project.is_active == True)
-                .where(Project.last_seen < datetime.utcnow().replace(hour=0, minute=0, second=0))
-                .values(is_active=False)
-            )
+            # Mark projects not seen recently as inactive.
+            # Only run when scanning ALL sources — a partial scan (e.g. just
+            # "charleston-permits" on startup) must not deactivate projects from
+            # other sources that weren't included in this run.
+            if sources is None:
+                await session.execute(
+                    update(Project)
+                    .where(Project.is_active == True)
+                    .where(Project.last_seen < datetime.utcnow().replace(hour=0, minute=0, second=0))
+                    .values(is_active=False)
+                )
             
             await session.commit()
             

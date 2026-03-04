@@ -264,7 +264,8 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 permit_type = str(a.get("PERMIT_TYPE") or a.get("PERMITTYPE") or "Permit")
 
                 # Identify trade permits (electrical, plumbing, mechanical, etc.).
-                # We no longer skip these entirely — we store them with category="trade-permit"
+                # We no longer skip these entirely — we store them with granular trade categories
+                # (electrical, fire-sprinkler, plumbing, mechanical, roofing, trade-permit)
                 # so they contribute to contractor discovery without appearing in the project list.
                 _TRADE_PERMIT_RE = re.compile(
                     r"operational\s+permit|zoning\s+verification|fire\s+protection|"
@@ -344,7 +345,22 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 # external_id prevents duplicate DB rows when the same permit appears in
                 # both layers (e.g. after the PMPERMITID-based dedup passes it through).
                 ext_id = str(a.get("PERMIT_NUMBER") or a.get("OBJECTID") or abs(hash(title)))
-                cat = "trade-permit" if is_trade_permit else classify_project(title, full_desc)
+                if is_trade_permit:
+                    pt = permit_type.lower()
+                    if "fire" in pt or "sprinkler" in pt:
+                        cat = "fire-sprinkler"
+                    elif "electrical" in pt:
+                        cat = "electrical"
+                    elif "plumbing" in pt:
+                        cat = "plumbing"
+                    elif "mechanical" in pt:
+                        cat = "mechanical"
+                    elif "roofing" in pt:
+                        cat = "roofing"
+                    else:
+                        cat = "trade-permit"
+                else:
+                    cat = classify_project(title, full_desc)
 
                 pmpermitid = str(a.get("PMPERMITID") or "")
                 pmpermitids.append(pmpermitid)

@@ -54,7 +54,8 @@ async def list_projects(
 
     # Residential and trade-permit categories are not shown in the project list.
     # Trade permits are stored for contractor discovery only (see /subcontractors endpoint).
-    conditions.append(Project.category.not_in(["residential", "trade-permit"]))
+    _HIDDEN_CATS = ["residential", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing"]
+    conditions.append(Project.category.not_in(_HIDDEN_CATS))
 
     if categories:
         cat_list = [c.strip() for c in categories.split(",")]
@@ -135,7 +136,7 @@ async def map_points(
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
-            Project.category.not_in(["residential", "trade-permit"]),
+            Project.category.not_in(["residential", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing"]),
             Project.status.not_in(["Completed", "Void", "Cancelled"]),
             Project.latitude.is_not(None),
             Project.longitude.is_not(None),
@@ -326,7 +327,7 @@ async def project_stats(
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
-            Project.category.not_in(["residential", "trade-permit"]),
+            Project.category.not_in(["residential", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing"]),
             Project.status.not_in(["Completed", "Void", "Cancelled"]),
         )
     )

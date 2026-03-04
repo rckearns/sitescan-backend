@@ -1,5 +1,6 @@
 """Projects endpoints — list, filter, search, save, and manage opportunities."""
 
+import math
 import statistics
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,6 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 from typing import Optional
 import httpx
+
+
+def _safe_float(v):
+    """Return None if v is None or NaN (JSON-incompatible float)."""
+    if v is None:
+        return None
+    try:
+        return None if math.isnan(float(v)) else float(v)
+    except (TypeError, ValueError):
+        return None
 
 from app.models.database import Project, SavedProject, ScanLog, get_db, User
 from app.models.schemas import (
@@ -144,22 +155,26 @@ async def map_points(
     )
     projects = result.scalars().all()
 
-    return [
-        {
+    result_list = []
+    for p in projects:
+        lat = _safe_float(p.latitude)
+        lng = _safe_float(p.longitude)
+        if lat is None or lng is None:
+            continue  # skip records with NaN coordinates stored in DB
+        result_list.append({
             "id": p.id,
             "title": p.title,
             "location": p.location,
-            "latitude": p.latitude,
-            "longitude": p.longitude,
+            "latitude": lat,
+            "longitude": lng,
             "match_score": score_against_profile(p, user),
-            "value": p.value,
+            "value": _safe_float(p.value),
             "status": p.status,
             "category": p.category,
             "source_id": p.source_id,
             "source_url": p.source_url,
-        }
-        for p in projects
-    ]
+        })
+    return result_list
 
 
 @router.get("/map/parcels")

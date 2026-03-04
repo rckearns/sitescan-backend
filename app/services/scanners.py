@@ -944,6 +944,225 @@ async def _probe_mtp_opal() -> None:
             logger.info(f"MtP OPAL REST probe: {e}")
 
 
+# ─── CHARLOTTE, NC ───────────────────────────────────────────────────────────
+
+_CLT_ARCGIS = "https://gis.charlottenc.gov/arcgis/rest/services"
+_NCDOT_URL   = (
+    "https://gis11.services.ncdot.gov/arcgis/rest/services"
+    "/NCDOT_RoadProjects/NCDOT_ActiveConstructionProjects/MapServer/0/query"
+)
+_MECK_COUNTY = 60  # NCDOT county code for Mecklenburg
+
+
+def _ms_to_date(ms) -> Optional[datetime]:
+    """Convert ArcGIS epoch-milliseconds timestamp to datetime."""
+    try:
+        return datetime.utcfromtimestamp(int(ms) / 1000) if ms else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _clt_arcgis_query(client: httpx.AsyncClient, service: str, layer: int,
+                             where: str, fields: str = "*", count: int = 1000) -> list[dict]:
+    """Query a Charlotte ArcGIS MapServer layer, return feature attribute dicts."""
+    try:
+        r = await client.get(
+            f"{_CLT_ARCGIS}/{service}/MapServer/{layer}/query",
+            params={"where": where, "outFields": fields, "resultRecordCount": str(count),
+                    "f": "json", "outSR": "4326"},
+            timeout=30,
+        )
+        data = r.json()
+        if data.get("error"):
+            logger.warning(f"Charlotte ArcGIS {service}/{layer}: {data['error']}")
+            return []
+        return data.get("features", [])
+    except Exception as e:
+        logger.warning(f"Charlotte ArcGIS {service}/{layer} error: {e}")
+        return []
+
+
+async def scan_charlotte_permits() -> list[dict]:
+    """Scan Charlotte, NC construction projects from three sources:
+
+    1. Charlotte ArcGIS PLN — Land Development Commercial Projects (active)
+    2. Charlotte ArcGIS CIP — Capital Improvement Projects (active/funded)
+    3. NCDOT — Active road/infrastructure construction in Mecklenburg County
+
+    Returns list of project dicts in the standard schema.
+    """
+    results: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=30) as client:
+
+        # ── 1. Land Development Commercial Projects ──────────────────────────
+        try:
+            feats = await _clt_arcgis_query(
+                client, "PLN/LandDevCommercialProjects", 0,
+                where="Category='Active'",
+            )
+            skip_types = {"sign", "fence", "pool", "grading only", "demo"}
+            for feat in feats:
+                a = feat.get("attributes", {}) or {}
+                status = str(a.get("Status") or "").strip()
+                if status.lower() in ("withdrawn", "closed", "void"):
+                    continue
+                proj_name  = _clean_text(str(a.get("ProjectName") or ""), 200)
+                proj_type  = _clean_text(str(a.get("ProjectType") or ""), 200)
+                proj_num   = str(a.get("ProjectNumber") or "").strip()
+                address    = _clean_text(str(a.get("Address") or ""), 300)
+                detail_url = str(a.get("ProjectDetail") or "")
+                if not proj_num:
+                    continue
+                if any(s in proj_type.lower() for s in skip_types):
+                    continue
+                title = proj_name or f"{proj_type} — {address}"
+                desc  = f"{proj_type} | {address} | {status}".strip(" |")
+                geom = feat.get("geometry") or {}
+                results.append({
+                    "source_id":   "charlotte-land-dev",
+                    "external_id": f"clt-ld-{proj_num}",
+                    "title":       _clean_text(title, 300),
+                    "description": _clean_text(desc, 1000),
+                    "location":    f"{address}, Charlotte, NC" if address else "Charlotte, NC",
+                    "address":     address,
+                    "latitude":    _safe_coord(geom.get("y")),
+                    "longitude":   _safe_coord(geom.get("x")),
+                    "value":       None,
+                    "category":    classify_project(title, desc),
+                    "match_score": 50,
+                    "status":      status or "Active",
+                    "posted_date": _ms_to_date(a.get("StatusDate")),
+                    "permit_number": proj_num,
+                    "contractor":  "",
+                    "source_url":  detail_url or "https://charlottenc.gov/growth-and-development",
+                    "raw_data":    dict(a),
+                })
+            logger.info(f"Charlotte land dev: {len([r for r in results if r['source_id']=='charlotte-land-dev'])} projects")
+        except Exception as e:
+            logger.warning(f"Charlotte land dev scan failed: {e}")
+
+        # ── 2. Capital Improvement Projects ──────────────────────────────────
+        try:
+            cip_before = len(results)
+            # Try layer 0 first; CIP MapServer may have multiple layers
+            for layer_id in [0, 1]:
+                feats = await _clt_arcgis_query(
+                    client, "CIP/Capital_Improvement_Project_List", layer_id,
+                    where="1=1", count=500,
+                )
+                if not feats:
+                    continue
+                for feat in feats:
+                    a = feat.get("attributes", {}) or {}
+                    proj_id   = str(a.get("ProjectID") or a.get("PROJECTID") or "").strip()
+                    proj_name = _clean_text(str(
+                        a.get("Project_Name") or a.get("PROJECT_NAME") or a.get("ProjectName") or ""
+                    ), 200)
+                    location  = _clean_text(str(
+                        a.get("Location_Description") or a.get("LOCATION") or ""
+                    ), 300)
+                    proj_type = str(a.get("Project_Type") or a.get("PROJECT_TYPE") or "")
+                    status    = str(a.get("Status") or a.get("STATUS") or "Active")
+                    budget    = a.get("Total_Project_Budget") or a.get("TOTAL_BUDGET")
+                    try:
+                        value = float(str(budget).replace(",", "").replace("$", "") or 0) or None
+                    except (TypeError, ValueError):
+                        value = None
+                    start_ms  = a.get("Anticipated_Start_Date") or a.get("START_DATE")
+                    end_ms    = a.get("Anticipated_Compl_Date") or a.get("END_DATE")
+                    if not proj_id and not proj_name:
+                        continue
+                    ext_id = proj_id or re.sub(r"\W+", "-", proj_name.lower())[:40]
+                    title  = proj_name or f"CIP Project {proj_id}"
+                    desc   = f"{proj_type} | {location} | {status}".strip(" |")
+                    geom = feat.get("geometry") or {}
+                    results.append({
+                        "source_id":   "charlotte-cip",
+                        "external_id": f"clt-cip-{ext_id}",
+                        "title":       _clean_text(title, 300),
+                        "description": _clean_text(desc, 1000),
+                        "location":    f"{location}, Charlotte, NC" if location else "Charlotte, NC",
+                        "address":     location,
+                        "latitude":    _safe_coord(geom.get("y")),
+                        "longitude":   _safe_coord(geom.get("x")),
+                        "value":       value,
+                        "category":    classify_project(title, desc),
+                        "match_score": 50,
+                        "status":      status,
+                        "posted_date": _ms_to_date(start_ms),
+                        "deadline":    _ms_to_date(end_ms),
+                        "permit_number": proj_id,
+                        "contractor":  str(a.get("Project_Manager") or ""),
+                        "source_url":  "https://charlottenc.gov/city-government/budget-strategy/capital-investment-plan",
+                        "raw_data":    dict(a),
+                    })
+                if len(results) > cip_before:
+                    break  # got results from this layer, stop
+            logger.info(f"Charlotte CIP: {len(results) - cip_before} projects")
+        except Exception as e:
+            logger.warning(f"Charlotte CIP scan failed: {e}")
+
+        # ── 3. NCDOT Active Construction (Mecklenburg County) ─────────────────
+        try:
+            ncdot_before = len(results)
+            r = await client.get(
+                _NCDOT_URL,
+                params={
+                    "where": f"CountyNumber={_MECK_COUNTY} AND CompletionPercent < 95",
+                    "outFields": "*",
+                    "resultRecordCount": "500",
+                    "f": "json",
+                    "outSR": "4326",
+                },
+                timeout=30,
+            )
+            data = r.json()
+            if data.get("error"):
+                logger.warning(f"NCDOT query error: {data['error']}")
+            else:
+                for feat in data.get("features", []):
+                    a    = feat.get("attributes", {}) or {}
+                    cnum = str(a.get("ContractNumber") or "").strip()
+                    desc = _clean_text(str(a.get("LocationsDescription") or ""), 500)
+                    nick = _clean_text(str(a.get("ContractNickname") or ""), 100)
+                    route  = str(a.get("Route") or "")
+                    pct    = a.get("CompletionPercent") or 0
+                    status = "Active" if pct < 95 else "Near Complete"
+                    title  = nick or desc or f"NCDOT Contract {cnum}"
+                    full_desc = f"{desc} | Route: {route} | {pct:.0f}% complete"
+                    # NCDOT geometry is multipoint
+                    geom   = feat.get("geometry") or {}
+                    pts    = geom.get("points") or []
+                    lat    = _safe_coord(pts[0][1]) if pts else None
+                    lng    = _safe_coord(pts[0][0]) if pts else None
+                    results.append({
+                        "source_id":   "charlotte-ncdot",
+                        "external_id": f"ncdot-{cnum}",
+                        "title":       _clean_text(title, 300),
+                        "description": _clean_text(full_desc, 1000),
+                        "location":    f"{route}, Mecklenburg County, NC" if route else "Charlotte, NC",
+                        "address":     desc[:200] if desc else "",
+                        "latitude":    lat,
+                        "longitude":   lng,
+                        "value":       None,
+                        "category":    "infrastructure",
+                        "match_score": 50,
+                        "status":      status,
+                        "posted_date": _ms_to_date(a.get("ContractActiveDate")),
+                        "permit_number": cnum,
+                        "contractor":  "",
+                        "source_url":  f"https://www.ncdot.gov/projects/",
+                        "raw_data":    dict(a),
+                    })
+            logger.info(f"Charlotte NCDOT: {len(results) - ncdot_before} projects")
+        except Exception as e:
+            logger.warning(f"Charlotte NCDOT scan failed: {e}")
+
+    logger.info(f"Charlotte scan total: {len(results)} projects")
+    return results
+
+
 ALL_SCANNERS = {
     "sam-gov": {"name": "SAM.gov Federal Opportunities", "func": scan_sam_gov, "needs_key": True},
     "charleston-permits": {"name": "Charleston Building Permits", "func": scan_charleston_permits, "needs_key": False},
@@ -951,4 +1170,5 @@ ALL_SCANNERS = {
     "mt-pleasant-permits": {"name": "Mt. Pleasant Building Permits", "func": scan_mt_pleasant_permits, "needs_key": False},
     "scbo": {"name": "SC Business Opportunities", "func": scan_scbo, "needs_key": False},
     "charleston-city-bids": {"name": "Charleston City Bids", "func": scan_charleston_bids, "needs_key": False},
+    "charlotte-permits": {"name": "Charlotte, NC Permits & Projects", "func": scan_charlotte_permits, "needs_key": False},
 }

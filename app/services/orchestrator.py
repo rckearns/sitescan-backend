@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import Project, ScanLog, User, get_session_factory
 from app.services.scanners import (
     scan_sam_gov, scan_charleston_permits, scan_scbo,
-    scan_charleston_bids, ALL_SCANNERS,
+    scan_charleston_bids, scan_north_charleston_permits,
+    scan_mt_pleasant_permits, ALL_SCANNERS,
 )
 from app.config import get_settings
 
@@ -173,6 +174,26 @@ async def run_source_scan(
                     ]
                 else:
                     projects = await scan_scbo()
+
+            elif source_id == "north-charleston-permits":
+                projects = await scan_north_charleston_permits()
+                if len(projects) > 50:
+                    await session.execute(
+                        update(Project)
+                        .where(Project.source_id == "north-charleston-permits")
+                        .where(Project.is_active == True)
+                        .values(is_active=False)
+                    )
+
+            elif source_id == "mt-pleasant-permits":
+                projects = await scan_mt_pleasant_permits()
+                if len(projects) > 50:
+                    await session.execute(
+                        update(Project)
+                        .where(Project.source_id == "mt-pleasant-permits")
+                        .where(Project.is_active == True)
+                        .values(is_active=False)
+                    )
 
             elif source_id == "charleston-city-bids":
                 projects = await scan_charleston_bids()

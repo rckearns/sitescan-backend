@@ -536,9 +536,356 @@ async def scan_charleston_bids():
     return results
 
 
+async def scan_north_charleston_permits() -> list[dict]:
+    """North Charleston building permits via ArcGIS or CustomerPortal.
+
+    Discovery scanner: probes ArcGIS (expected 499 Token Required) then
+    CustomerPortal. Returns [] on failure so the pre-clear guard protects DB.
+    """
+    results = []
+
+    # ── Step 1: Probe ArcGIS PermitCustomers MapServer (likely 499 Token Required) ──
+    nc_arcgis_base = (
+        "https://arc.northcharleston.org/arcgis/rest/services/Admin/PermitCustomers/MapServer"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            probe = await client.get(f"{nc_arcgis_base}?f=json")
+            logger.info(
+                f"NC ArcGIS probe: HTTP {probe.status_code}, "
+                f"preview={probe.text[:300]}"
+            )
+            if probe.status_code == 200:
+                data = probe.json()
+                if data.get("layers") and not data.get("error"):
+                    logger.info(
+                        f"NC ArcGIS: public access! layers="
+                        f"{[(l.get('id'), l.get('name')) for l in data['layers']]}"
+                    )
+                    results = await _query_nc_arcgis(client, nc_arcgis_base, data["layers"])
+                else:
+                    logger.info(f"NC ArcGIS: 200 but error/no layers: {data.get('error')}")
+    except Exception as e:
+        logger.warning(f"NC ArcGIS probe failed: {e}")
+
+    if results:
+        return results
+
+    # ── Step 2: CustomerPortal HTML probe ──
+    portal_url = "https://maps.northcharleston.org/CustomerPortal/"
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.get(portal_url)
+            logger.info(
+                f"NC CustomerPortal: HTTP {resp.status_code}, "
+                f"ct={resp.headers.get('content-type')}, bytes={len(resp.text)}"
+            )
+            if resp.status_code == 200:
+                html = resp.text
+                rest_pats = re.findall(
+                    r'https?://[^"\'<>\s]{10,}(?:permit|search|query)[^"\'<>\s]*',
+                    html, re.IGNORECASE,
+                )
+                logger.info(f"NC CustomerPortal REST patterns: {rest_pats[:10]}")
+                for api_path in [
+                    "/CustomerPortal/api/permits",
+                    "/CustomerPortal/api/v1/permits",
+                    "/PermitPortal/api/permits",
+                ]:
+                    try:
+                        base = f"https://maps.northcharleston.org{api_path}"
+                        api_resp = await client.get(base, headers={"Accept": "application/json"})
+                        logger.info(
+                            f"NC portal API {api_path}: HTTP {api_resp.status_code}, "
+                            f"preview={api_resp.text[:200]}"
+                        )
+                    except Exception as e:
+                        logger.info(f"NC portal API {api_path}: {e}")
+    except Exception as e:
+        logger.warning(f"NC CustomerPortal probe failed: {e}")
+
+    logger.info("NC permits: no data source accessible yet — returning []")
+    return results
+
+
+async def _query_nc_arcgis(client, base_url: str, layers: list) -> list[dict]:
+    """Query North Charleston ArcGIS MapServer layers if publicly accessible."""
+    results = []
+    layer_ids = [
+        l.get("id") for l in layers
+        if any(kw in (l.get("name") or "").lower() for kw in ["permit", "build", "commercial"])
+    ] or [0]
+    for layer_id in layer_ids[:2]:
+        try:
+            r = await client.get(
+                f"{base_url}/{layer_id}/query",
+                params={"where": "1=1", "outFields": "*", "resultRecordCount": "5",
+                        "f": "json", "outSR": "4326"},
+            )
+            d = r.json()
+            if d.get("error"):
+                logger.warning(f"NC ArcGIS layer {layer_id}: {d['error']}")
+                continue
+            feats = d.get("features", [])
+            logger.info(
+                f"NC ArcGIS layer {layer_id}: sample feats={len(feats)}, "
+                f"fields={[f.get('name') for f in d.get('fields', [])]}"
+            )
+            if feats:
+                logger.info(f"NC ArcGIS layer {layer_id} first record: {feats[0].get('attributes', {})}")
+            all_r = await client.get(
+                f"{base_url}/{layer_id}/query",
+                params={"where": "1=1", "outFields": "*", "resultRecordCount": "5000",
+                        "f": "json", "outSR": "4326"},
+            )
+            for feat in all_r.json().get("features", []):
+                rec = _parse_nc_arcgis_feature(feat)
+                if rec:
+                    results.append(rec)
+        except Exception as e:
+            logger.warning(f"NC ArcGIS layer {layer_id}: {e}")
+    return results
+
+
+def _parse_nc_arcgis_feature(feat: dict) -> Optional[dict]:
+    """Parse a North Charleston ArcGIS feature into standard schema (field names TBD)."""
+    a = feat.get("attributes", {})
+    permit_number = str(
+        a.get("PERMIT_NUMBER") or a.get("PermitNumber") or a.get("PERMITNUMBER") or ""
+    ).strip()
+    if not permit_number or permit_number == "None":
+        return None
+    address = _clean_text(str(
+        a.get("ADDRESS") or a.get("SITE_ADDRESS") or a.get("Address") or ""
+    ))
+    permit_type = str(a.get("PERMIT_TYPE") or a.get("PermitType") or a.get("TYPE_DESC") or "")
+    status = str(a.get("PERMIT_STATUS") or a.get("Status") or "Active")
+    skip = {"electrical", "plumbing", "mechanical", "fire", "gas", "sign", "fence", "pool"}
+    if any(s in permit_type.lower() for s in skip):
+        return None
+    value_raw = a.get("JOB_VALUE") or a.get("VALUE") or a.get("VALUATION") or 0
+    try:
+        value = float(str(value_raw).replace(",", "").replace("$", "") or 0) or None
+    except (ValueError, TypeError):
+        value = None
+    desc = f"{permit_type} — {address}".strip(" —")
+    geom = feat.get("geometry") or {}
+    return {
+        "source_id": "north-charleston-permits",
+        "external_id": f"nch-{permit_number}",
+        "title": _clean_text(desc, 300),
+        "description": _clean_text(desc, 1000),
+        "location": f"{address}, North Charleston, SC",
+        "address": address,
+        "latitude": geom.get("y"),
+        "longitude": geom.get("x"),
+        "value": value,
+        "category": classify_project(desc, desc),
+        "match_score": 50,
+        "status": status,
+        "posted_date": _parse_date(
+            a.get("ISSUED_DATE") or a.get("IssuedDate") or a.get("ISSUE_DATE")
+        ),
+        "permit_number": permit_number,
+        "contractor": "",
+        "source_url": "https://maps.northcharleston.org/CustomerPortal/",
+        "raw_data": dict(a),
+    }
+
+
+async def scan_mt_pleasant_permits() -> list[dict]:
+    """Mt. Pleasant building permits via ArcGIS Online FeatureServer or Oracle OPAL.
+
+    Discovery scanner: searches AGOL for permit FeatureServers, queries any found,
+    then probes Oracle OPAL. Returns [] on failure.
+    """
+    results = []
+
+    # ── Step 1: Search ArcGIS Online for Mt. Pleasant permit services ──
+    try:
+        results = await _scan_mtp_agol()
+    except Exception as e:
+        logger.warning(f"MtP AGOL search failed: {e}")
+
+    if results:
+        return results
+
+    # ── Step 2: Oracle OPAL probe (expect SSO redirect — logs findings) ──
+    try:
+        await _probe_mtp_opal()
+    except Exception as e:
+        logger.warning(f"MtP OPAL probe failed: {e}")
+
+    logger.info("MtP permits: no data source accessible yet — returning []")
+    return results
+
+
+async def _scan_mtp_agol() -> list[dict]:
+    """Search ArcGIS Online for Mt. Pleasant permit FeatureServers."""
+    results = []
+    search_url = "https://gis-tomp.maps.arcgis.com/sharing/rest/search"
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        for q in ["permit owner:gis-tomp", "building permits site:gis-tomp"]:
+            resp = await client.get(search_url, params={"q": q, "num": 20, "f": "json"})
+            logger.info(f"MtP AGOL search '{q}': HTTP {resp.status_code}")
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data.get("results", [])
+            logger.info(
+                f"MtP AGOL: {data.get('total', 0)} total, "
+                f"items={[(i.get('title'), i.get('type'), i.get('url')) for i in items]}"
+            )
+            fs_items = [
+                i for i in items
+                if "FeatureServer" in (i.get("url") or "")
+                or i.get("type") == "Feature Service"
+            ]
+            for item in fs_items[:2]:
+                fs_url = item.get("url", "")
+                if fs_url:
+                    recs = await _query_mtp_feature_server(client, fs_url)
+                    results.extend(recs)
+            if results:
+                return results
+    return results
+
+
+async def _query_mtp_feature_server(client, fs_url: str) -> list[dict]:
+    """Query a Mt. Pleasant ArcGIS FeatureServer and return standard records."""
+    results = []
+    meta = await client.get(f"{fs_url}?f=json")
+    if meta.status_code != 200:
+        return results
+    data = meta.json()
+    if data.get("error"):
+        logger.warning(f"MtP FeatureServer error: {data['error']}")
+        return results
+    layers = data.get("layers", [])
+    logger.info(f"MtP FeatureServer: layers={[(l.get('id'), l.get('name')) for l in layers]}")
+    for layer in layers[:3]:
+        layer_id = layer.get("id", 0)
+        if any(skip in (layer.get("name") or "").lower()
+               for skip in ["boundary", "parcel", "zoning", "road"]):
+            continue
+        try:
+            r = await client.get(
+                f"{fs_url}/{layer_id}/query",
+                params={"where": "1=1", "outFields": "*", "resultRecordCount": "10",
+                        "f": "json", "outSR": "4326"},
+            )
+            ld = r.json()
+            if ld.get("error"):
+                logger.warning(f"MtP layer {layer_id}: {ld['error']}")
+                continue
+            feats = ld.get("features", [])
+            logger.info(
+                f"MtP layer {layer_id} ({layer.get('name')}): "
+                f"feats={len(feats)}, fields={[f.get('name') for f in ld.get('fields', [])]}"
+            )
+            if not feats:
+                continue
+            logger.info(f"MtP layer {layer_id} first record: {feats[0].get('attributes', {})}")
+            first_keys = {k.lower() for k in feats[0].get("attributes", {})}
+            if any(k in first_keys for k in
+                   ("permit_number", "permitnumber", "permit_no", "permit_id")):
+                all_r = await client.get(
+                    f"{fs_url}/{layer_id}/query",
+                    params={"where": "1=1", "outFields": "*", "resultRecordCount": "5000",
+                            "f": "json", "outSR": "4326"},
+                )
+                for feat in all_r.json().get("features", []):
+                    rec = _parse_mtp_feature(feat)
+                    if rec:
+                        results.append(rec)
+        except Exception as e:
+            logger.warning(f"MtP layer {layer_id}: {e}")
+    return results
+
+
+def _parse_mtp_feature(feat: dict) -> Optional[dict]:
+    """Parse a Mt. Pleasant ArcGIS feature into standard schema."""
+    a = feat.get("attributes", {})
+    permit_number = str(
+        a.get("PERMIT_NUMBER") or a.get("PermitNumber") or a.get("PERMIT_NO")
+        or a.get("PERMIT_ID") or a.get("permit_number") or ""
+    ).strip()
+    if not permit_number or permit_number == "None":
+        return None
+    address = _clean_text(str(
+        a.get("ADDRESS") or a.get("SITE_ADDRESS") or a.get("WORK_ADDRESS")
+        or a.get("address") or ""
+    ))
+    permit_type = str(
+        a.get("PERMIT_TYPE") or a.get("PermitType") or a.get("TYPE") or a.get("permit_type") or ""
+    )
+    status = str(a.get("PERMIT_STATUS") or a.get("Status") or a.get("STATUS") or "Active")
+    skip = {"electrical", "plumbing", "mechanical", "fire", "gas", "sign", "fence", "pool"}
+    if any(s in permit_type.lower() for s in skip):
+        return None
+    value_raw = a.get("JOB_VALUE") or a.get("VALUE") or a.get("VALUATION") or a.get("value") or 0
+    try:
+        value = float(str(value_raw).replace(",", "").replace("$", "") or 0) or None
+    except (ValueError, TypeError):
+        value = None
+    desc = f"{permit_type} — {address}".strip(" —")
+    geom = feat.get("geometry") or {}
+    return {
+        "source_id": "mt-pleasant-permits",
+        "external_id": f"mtp-{permit_number}",
+        "title": _clean_text(desc, 300),
+        "description": _clean_text(desc, 1000),
+        "location": f"{address}, Mt. Pleasant, SC",
+        "address": address,
+        "latitude": geom.get("y"),
+        "longitude": geom.get("x"),
+        "value": value,
+        "category": classify_project(desc, desc),
+        "match_score": 50,
+        "status": status,
+        "posted_date": _parse_date(
+            a.get("ISSUED_DATE") or a.get("ISSUE_DATE") or a.get("IssuedDate")
+        ),
+        "permit_number": permit_number,
+        "contractor": "",
+        "source_url": "https://gis-tomp.hub.arcgis.com",
+        "raw_data": dict(a),
+    }
+
+
+async def _probe_mtp_opal() -> None:
+    """Probe Mt. Pleasant's Oracle OPAL portal. Logs findings for Railway diagnostics."""
+    opal_url = "https://eody.fa.us6.oraclecloud.com/fscmUI/publicSector.html"
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+        resp = await client.get(opal_url)
+        logger.info(
+            f"MtP OPAL: HTTP {resp.status_code}, "
+            f"ct={resp.headers.get('content-type')}, "
+            f"location={resp.headers.get('location', '')[:200]}"
+        )
+        rest_url = (
+            "https://eody.fa.us6.oraclecloud.com/fscmRestApi/resources/"
+            "11.13.18.05/publicPermits"
+        )
+        try:
+            api_resp = await client.get(
+                rest_url,
+                params={"limit": 10, "fields": "PermitNumber,PermitTypeName,StatusCode,AddressLine1"},
+                headers={"Accept": "application/json"},
+            )
+            logger.info(
+                f"MtP OPAL REST: HTTP {api_resp.status_code}, "
+                f"preview={api_resp.text[:300]}"
+            )
+        except Exception as e:
+            logger.info(f"MtP OPAL REST probe: {e}")
+
+
 ALL_SCANNERS = {
     "sam-gov": {"name": "SAM.gov Federal Opportunities", "func": scan_sam_gov, "needs_key": True},
     "charleston-permits": {"name": "Charleston Building Permits", "func": scan_charleston_permits, "needs_key": False},
+    "north-charleston-permits": {"name": "North Charleston Building Permits", "func": scan_north_charleston_permits, "needs_key": False},
+    "mt-pleasant-permits": {"name": "Mt. Pleasant Building Permits", "func": scan_mt_pleasant_permits, "needs_key": False},
     "scbo": {"name": "SC Business Opportunities", "func": scan_scbo, "needs_key": False},
     "charleston-city-bids": {"name": "Charleston City Bids", "func": scan_charleston_bids, "needs_key": False},
 }

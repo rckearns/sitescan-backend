@@ -144,6 +144,39 @@ async def test_connectivity(user: User = Depends(get_current_user)):
     except Exception as e:
         results["energov"] = {"error": str(e)}
 
+    # Test North Charleston ArcGIS PermitCustomers MapServer
+    try:
+        nc_arcgis = (
+            "https://arc.northcharleston.org/arcgis/rest/services/Admin/PermitCustomers/MapServer"
+        )
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            r = await client.get(f"{nc_arcgis}?f=json")
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            results["north_charleston_arcgis"] = {
+                "status_code": r.status_code,
+                "has_layers": bool(body.get("layers")),
+                "error": body.get("error"),
+                "preview": r.text[:200],
+            }
+    except Exception as e:
+        results["north_charleston_arcgis"] = {"error": str(e)}
+
+    # Test Mt. Pleasant AGOL search
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(
+                "https://gis-tomp.maps.arcgis.com/sharing/rest/search",
+                params={"q": "permit owner:gis-tomp", "num": 5, "f": "json"},
+            )
+            data = r.json() if r.status_code == 200 else {}
+            results["mt_pleasant_agol"] = {
+                "status_code": r.status_code,
+                "total_results": data.get("total", 0),
+                "items": [(i.get("title"), i.get("type")) for i in data.get("results", [])],
+            }
+    except Exception as e:
+        results["mt_pleasant_agol"] = {"error": str(e)}
+
     return results
 
 

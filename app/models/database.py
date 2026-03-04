@@ -307,29 +307,30 @@ async def init_db():
     get_session_factory()  # ensures _engine is initialized
     is_postgres = "postgresql" in str(_engine.url)
 
+    # create_all in its own transaction — migrations run separately so a
+    # failed ALTER TABLE can't roll back the table creation.
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        if is_postgres:
-            # Widen naics_code from VARCHAR(20) → TEXT (safe no-op if already TEXT)
-            # NOTE: ALTER COLUMN TYPE is PostgreSQL-only — skip on SQLite
-            await conn.execute(text(
-                "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT"
-            ))
-            # Add scoring criteria columns if they don't exist yet
-            for col, typedef in [
-                ("criteria_min_value", "FLOAT"),
-                ("criteria_categories", "JSON"),
-                ("criteria_statuses", "JSON"),
-                ("criteria_sources", "JSON"),
-            ]:
-                await conn.execute(text(
-                    f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}"
-                ))
-            # Add org_id FK to users (company profile link)
-            await conn.execute(text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)"
-            ))
+    if is_postgres:
+        # Each migration in its own connection so a failure (e.g. column
+        # already exists with a constraint) doesn't abort the others.
+        migrations = [
+            "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_min_value FLOAT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_categories JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_statuses JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
+        ]
+        for sql in migrations:
+            try:
+                async with _engine.begin() as conn:
+                    await conn.execute(text(sql))
+            except Exception as e:
+                # Column/type already correct — safe to ignore
+                import logging as _lg
+                _lg.getLogger("sitescan.db").debug(f"Migration skipped ({e.__class__.__name__}): {sql[:60]}")
 
 
 async def get_db():

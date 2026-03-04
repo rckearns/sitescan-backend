@@ -165,67 +165,6 @@ async def health():
     return {"status": "ok", "service": "sitescan-api", "version": "1.0.0"}
 
 
-@app.get("/debug/test-profile-user/{user_id}")
-async def debug_test_profile_user(user_id: int):
-    """Test _get_or_create_org for a specific user (commits, so use with care)."""
-    from sqlalchemy import text as _t, select as _sel
-    from app.models.database import get_session_factory, User
-    from app.routers.profile import _get_or_create_org
-    sf = get_session_factory()
-    steps = []
-    async with sf() as s:
-        try:
-            steps.append(f"loading user {user_id}")
-            r = await s.execute(_sel(User).where(User.id == user_id))
-            user = r.scalar_one_or_none()
-            if not user:
-                return {"status": "error", "steps": steps, "error": "user not found"}
-            steps.append(f"user loaded, org_id={user.org_id}")
-            org = await _get_or_create_org(user, s)
-            steps.append(f"org created/loaded, id={org.id}")
-            d = {"id": org.id, "legal_name": org.legal_name or ""}
-            steps.append("committing")
-            await s.commit()
-            steps.append("committed ok")
-            return {"status": "ok", "steps": steps, "org": d}
-        except Exception as e:
-            await s.rollback()
-            return {"status": "error", "steps": steps, "error": str(e), "type": type(e).__name__}
-
-
-@app.get("/debug/test-profile")
-async def debug_test_profile():
-    """Diagnostic: test org creation without auth to isolate the error."""
-    from sqlalchemy import text as _t
-    from app.models.database import get_session_factory, Organization
-    from app.routers.profile import _load_org
-    sf = get_session_factory()
-    steps = []
-    async with sf() as s:
-        try:
-            steps.append("creating org object")
-            org = Organization()
-            s.add(org)
-            steps.append("flushing insert")
-            await s.flush()
-            steps.append(f"org.id = {org.id}")
-            steps.append("reloading with selectinload")
-            org2 = await _load_org(org.id, s)
-            steps.append(f"reload ok, principals={org2.principals}, project_refs={org2.project_refs}")
-            steps.append("building dict")
-            result = {
-                "id": org2.id, "legal_name": org2.legal_name or "",
-                "license_classifications": org2.license_classifications or [],
-                "compliance_flags": org2.compliance_flags or {},
-                "principals": [], "project_refs": [], "personnel": [],
-            }
-            steps.append("rolling back (debug only, no actual create)")
-            await s.rollback()
-            return {"status": "ok", "steps": steps, "sample": result}
-        except Exception as e:
-            await s.rollback()
-            return {"status": "error", "steps": steps, "error": str(e), "type": type(e).__name__}
-
 
 @app.get("/health/db")
 async def health_db():

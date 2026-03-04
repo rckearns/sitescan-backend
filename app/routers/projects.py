@@ -115,8 +115,13 @@ async def list_projects(
         # Treat None/0 as 0 — sorts to bottom on high-to-low, top on low-to-high
         scored.sort(key=lambda x: x[0].value or 0, reverse=reverse)
     elif sort_by == "posted_date":
+        # Records without a posted_date sort to the bottom regardless of direction.
+        # Secondary key is first_seen so undated records still have a meaningful order.
         scored.sort(
-            key=lambda x: (x[0].posted_date is None, x[0].posted_date or datetime.min),
+            key=lambda x: (
+                x[0].posted_date is not None,
+                x[0].posted_date or x[0].first_seen,
+            ),
             reverse=reverse,
         )
     elif sort_by == "first_seen":

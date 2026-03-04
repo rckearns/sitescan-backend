@@ -403,13 +403,21 @@ async def _fetch_scbo_html(url: str) -> str:
         zenrows_key = get_settings().zenrows_api_key
     if zenrows_key:
         logger.info(f"SCBO fetch via ZenRows: {url}")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.get(
-                "https://api.zenrows.com/v1/",
-                params={"apikey": zenrows_key, "url": url},
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.get(
+                    "https://api.zenrows.com/v1/",
+                    params={"apikey": zenrows_key, "url": url},
+                )
+                resp.raise_for_status()
+                return resp.text
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"ZenRows returned {e.response.status_code} for {url} — "
+                f"falling back to curl_cffi/direct"
             )
-            resp.raise_for_status()
-            return resp.text
+        except Exception as e:
+            logger.warning(f"ZenRows request failed ({e}) — falling back to curl_cffi/direct")
     if _CURL_CFFI_AVAILABLE:
         async with CurlSession(impersonate="chrome120") as client:
             resp = await client.get(url, timeout=30)

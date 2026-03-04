@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     constructconnect_api_key: str = ""
     zenrows_api_key: str = ""
 
+    # AI
+    anthropic_api_key: str = ""
+
     model_config = {"env_file": None}
 
 

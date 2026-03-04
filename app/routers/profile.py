@@ -4,6 +4,7 @@ from io import BytesIO
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -400,3 +401,32 @@ async def generate_soq_endpoint(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ─── BID ASSIST ───────────────────────────────────────────────────────────────
+
+class BidAssistRequest(BaseModel):
+    rfq_text: str
+
+
+@router.post("/bid-assist")
+async def bid_assist(
+    req: BidAssistRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Generate a bid narrative from the org profile + RFQ text using Claude."""
+    org_id = _assert_org(user)
+    org = await _load_org(org_id, db)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    from app.services.bid_assist import generate_bid_narrative
+    try:
+        narrative = generate_bid_narrative(org, req.rfq_text)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bid assist failed: {e}")
+
+    return {"narrative": narrative}

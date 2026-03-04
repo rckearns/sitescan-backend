@@ -202,11 +202,11 @@ async def scan_charleston_permits(arcgis_url="", record_count=500):
         "outSR": "4326",
     }
     # Layer 21: new construction since 2010 (Emanuel Nine Memorial, 310 Broad St, etc.)
-    # Must include Completed/Finaled permits — Layer 21 projects are mostly Completed
-    # (finished buildings), which is exactly what we want for contractor intelligence.
-    # Confirmed via connectivity test: Layer 21 sample statuses are largely Completed.
+    # Layer 21 has 14,430 total records but maxRecordCount=5,000 — using Issued-only
+    # avoids truncation (there are 2,492 Issued records, well under the limit).
+    # Emanuel Nine (BC2022-03662) is status=Issued so this filter captures it.
     layer21_params = {
-        "where": "PERMIT_STATUS <> 'Void' AND PERMIT_STATUS <> 'Cancelled'",
+        "where": "PERMIT_STATUS = 'Issued'",
         "outFields": "*",
         "resultRecordCount": "5000",
         "f": "json",

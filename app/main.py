@@ -165,6 +165,34 @@ async def health():
     return {"status": "ok", "service": "sitescan-api", "version": "1.0.0"}
 
 
+@app.get("/debug/test-profile-user/{user_id}")
+async def debug_test_profile_user(user_id: int):
+    """Test _get_or_create_org for a specific user (commits, so use with care)."""
+    from sqlalchemy import text as _t, select as _sel
+    from app.models.database import get_session_factory, User
+    from app.routers.profile import _get_or_create_org
+    sf = get_session_factory()
+    steps = []
+    async with sf() as s:
+        try:
+            steps.append(f"loading user {user_id}")
+            r = await s.execute(_sel(User).where(User.id == user_id))
+            user = r.scalar_one_or_none()
+            if not user:
+                return {"status": "error", "steps": steps, "error": "user not found"}
+            steps.append(f"user loaded, org_id={user.org_id}")
+            org = await _get_or_create_org(user, s)
+            steps.append(f"org created/loaded, id={org.id}")
+            d = {"id": org.id, "legal_name": org.legal_name or ""}
+            steps.append("committing")
+            await s.commit()
+            steps.append("committed ok")
+            return {"status": "ok", "steps": steps, "org": d}
+        except Exception as e:
+            await s.rollback()
+            return {"status": "error", "steps": steps, "error": str(e), "type": type(e).__name__}
+
+
 @app.get("/debug/test-profile")
 async def debug_test_profile():
     """Diagnostic: test org creation without auth to isolate the error."""

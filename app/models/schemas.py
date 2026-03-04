@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, model_validator
 
 
 # ─── AUTH ────────────────────────────────────────────────────────────────────
@@ -247,34 +247,55 @@ class KeyPersonnelOut(KeyPersonnelIn):
 
 class OrgProfileOut(BaseModel):
     id: int
-    legal_name: str
-    entity_type: str
-    address_street: str
-    address_city: str
-    address_state: str
-    address_zip: str
-    phone: str
-    fax: str
-    email: str
-    website: str
-    contractor_license_number: str
-    license_classifications: list
-    insurance_company: str
-    insurance_agent_name: str
-    insurance_agent_phone: str
-    bonding_company: str
-    bonding_agent_name: str
-    bonding_agent_phone: str
-    bonding_capacity: str
-    emr: str
-    safety_meeting_frequency: str
-    compliance_flags: dict
-    principals: list[OrgPrincipalOut]
-    project_refs: list[ProjectRefOut]
-    personnel: list[KeyPersonnelOut]
+    legal_name: str = ""
+    entity_type: str = ""
+    address_street: str = ""
+    address_city: str = ""
+    address_state: str = ""
+    address_zip: str = ""
+    phone: str = ""
+    fax: str = ""
+    email: str = ""
+    website: str = ""
+    contractor_license_number: str = ""
+    license_classifications: list = []
+    insurance_company: str = ""
+    insurance_agent_name: str = ""
+    insurance_agent_phone: str = ""
+    bonding_company: str = ""
+    bonding_agent_name: str = ""
+    bonding_agent_phone: str = ""
+    bonding_capacity: str = ""
+    emr: str = ""
+    safety_meeting_frequency: str = ""
+    compliance_flags: dict = {}
+    principals: list[OrgPrincipalOut] = []
+    project_refs: list[ProjectRefOut] = []
+    personnel: list[KeyPersonnelOut] = []
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
+
+    @model_validator(mode='before')
+    @classmethod
+    def coerce_none_values(cls, data):
+        """Coerce None DB column values to empty defaults so Pydantic doesn't fail."""
+        if not hasattr(data, '__dict__'):
+            return data
+        str_fields = [
+            'legal_name', 'entity_type', 'address_street', 'address_city',
+            'address_state', 'address_zip', 'phone', 'fax', 'email', 'website',
+            'contractor_license_number', 'insurance_company', 'insurance_agent_name',
+            'insurance_agent_phone', 'bonding_company', 'bonding_agent_name',
+            'bonding_agent_phone', 'bonding_capacity', 'emr', 'safety_meeting_frequency',
+        ]
+        for f in str_fields:
+            if getattr(data, f, None) is None:
+                setattr(data, f, '')
+        if getattr(data, 'license_classifications', None) is None:
+            setattr(data, 'license_classifications', [])
+        if getattr(data, 'compliance_flags', None) is None:
+            setattr(data, 'compliance_flags', {})
+        return data
 
 
 class OrgProfileUpdate(BaseModel):

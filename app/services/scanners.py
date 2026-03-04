@@ -962,6 +962,22 @@ def _ms_to_date(ms) -> Optional[datetime]:
         return None
 
 
+def _flatten_attrs(attributes: dict) -> dict:
+    """Flatten fully-qualified ArcGIS field names to their short (suffix) form.
+
+    ArcGIS join layers return fields like
+    ``GdbGisuPub.HICAMS.ActiveContractsMap.ContractNumber``.
+    This helper builds a dict keyed by the suffix after the last '.' so
+    callers can use short names without caring about the join prefix.
+    Later keys win on collision (keeps the outermost join value).
+    """
+    out = {}
+    for k, v in attributes.items():
+        short = k.rsplit(".", 1)[-1]
+        out[short] = v
+    return out
+
+
 async def _clt_arcgis_query(client: httpx.AsyncClient, service: str, layer: int,
                              where: str, fields: str = "*", count: int = 1000) -> list[dict]:
     """Query a Charlotte ArcGIS MapServer layer, return feature attribute dicts."""
@@ -1045,17 +1061,21 @@ async def scan_charlotte_permits() -> list[dict]:
         # ── 2. Capital Improvement Projects ──────────────────────────────────
         try:
             cip_before = len(results)
-            # Try layer 0 first; CIP MapServer may have multiple layers
-            for layer_id in [0, 1]:
+            # Layer 0 is "County Boundary" (no useful data); table 1 is the CIP list.
+            # Also try Capital_Investment_Projects_Points (layer 0) for spatial data.
+            for service, layer_id in [
+                ("CIP/Capital_Investment_Projects_Points", 0),
+                ("CIP/Capital_Improvement_Project_List", 1),
+            ]:
                 feats = await _clt_arcgis_query(
-                    client, "CIP/Capital_Improvement_Project_List", layer_id,
+                    client, service, layer_id,
                     where="1=1", count=500,
                 )
                 if not feats:
                     continue
                 for feat in feats:
                     a = feat.get("attributes", {}) or {}
-                    proj_id   = str(a.get("ProjectID") or a.get("PROJECTID") or "").strip()
+                    proj_id   = str(a.get("Project_ID") or a.get("ProjectID") or a.get("PROJECTID") or "").strip()
                     proj_name = _clean_text(str(
                         a.get("Project_Name") or a.get("PROJECT_NAME") or a.get("ProjectName") or ""
                     ), 200)
@@ -1122,15 +1142,19 @@ async def scan_charlotte_permits() -> list[dict]:
                 logger.warning(f"NCDOT query error: {data['error']}")
             else:
                 for feat in data.get("features", []):
-                    a    = feat.get("attributes", {}) or {}
+                    raw  = feat.get("attributes", {}) or {}
+                    # NCDOT join layers return fully-qualified field names; flatten them.
+                    a    = _flatten_attrs(raw)
                     cnum = str(a.get("ContractNumber") or "").strip()
                     desc = _clean_text(str(a.get("LocationsDescription") or ""), 500)
                     nick = _clean_text(str(a.get("ContractNickname") or ""), 100)
                     route  = str(a.get("Route") or "")
                     pct    = a.get("CompletionPercent") or 0
-                    status = "Active" if pct < 95 else "Near Complete"
+                    if not cnum:
+                        continue  # skip if no contract number
+                    status = "Active" if float(pct) < 95 else "Near Complete"
                     title  = nick or desc or f"NCDOT Contract {cnum}"
-                    full_desc = f"{desc} | Route: {route} | {pct:.0f}% complete"
+                    full_desc = f"{desc} | Route: {route} | {pct:.0f}% complete".strip(" |")
                     # NCDOT geometry is multipoint
                     geom   = feat.get("geometry") or {}
                     pts    = geom.get("points") or []
@@ -1152,8 +1176,8 @@ async def scan_charlotte_permits() -> list[dict]:
                         "posted_date": _ms_to_date(a.get("ContractActiveDate")),
                         "permit_number": cnum,
                         "contractor":  "",
-                        "source_url":  f"https://www.ncdot.gov/projects/",
-                        "raw_data":    dict(a),
+                        "source_url":  "https://www.ncdot.gov/projects/",
+                        "raw_data":    dict(raw),
                     })
             logger.info(f"Charlotte NCDOT: {len(results) - ncdot_before} projects")
         except Exception as e:

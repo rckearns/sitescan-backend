@@ -434,30 +434,40 @@ async def bid_assist(
 
 @router.post("/bid-assist/parse-pdf")
 async def parse_pdf(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     user: User = Depends(get_current_user),
 ):
-    """Extract text from an uploaded PDF and return it for use in bid-assist."""
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-
+    """Extract text from one or more uploaded PDFs and return combined text."""
     try:
         from pypdf import PdfReader
     except ImportError:
         raise HTTPException(status_code=503, detail="pypdf not installed — add it to requirements.txt")
 
-    contents = await file.read()
-    if len(contents) > 20 * 1024 * 1024:  # 20 MB cap
-        raise HTTPException(status_code=413, detail="PDF too large (max 20 MB)")
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
 
-    try:
-        reader = PdfReader(BytesIO(contents))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        text = "\n\n".join(p.strip() for p in pages if p.strip())
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Could not parse PDF: {e}")
+    all_texts = []
+    for file in files:
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail=f"{file.filename}: only PDF files are supported")
 
-    if not text.strip():
-        raise HTTPException(status_code=422, detail="No text could be extracted from this PDF (it may be image-only)")
+        contents = await file.read()
+        if len(contents) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"{file.filename}: file too large (max 20 MB)")
 
-    return {"text": text[:12000]}  # cap at 12k chars — enough for any RFQ
+        try:
+            reader = PdfReader(BytesIO(contents))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            text = "\n\n".join(p.strip() for p in pages if p.strip())
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"{file.filename}: could not parse PDF: {e}")
+
+        if text.strip():
+            header = f"=== {file.filename} ===\n" if len(files) > 1 else ""
+            all_texts.append(header + text)
+
+    combined = "\n\n".join(all_texts)
+    if not combined.strip():
+        raise HTTPException(status_code=422, detail="No text could be extracted (PDFs may be image-only)")
+
+    return {"text": combined[:12000]}

@@ -324,6 +324,7 @@ async def init_db():
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude FLOAT",
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS permit_number VARCHAR(100) DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS contractor TEXT DEFAULT ''",
+            "ALTER TABLE projects ALTER COLUMN contractor TYPE TEXT",
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_url VARCHAR(500) DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS raw_data JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_min_value FLOAT",

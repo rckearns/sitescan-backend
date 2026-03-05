@@ -133,12 +133,14 @@ app = FastAPI(
 _ALLOWED_ORIGINS = [
     "https://www.yabodle.com",
     "https://yabodle.com",
+    "https://yabodle.pages.dev",
     "http://localhost:5173",   # Vite dev server
     "http://localhost:3000",
 ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://[a-z0-9]+\.yabodle\.pages\.dev",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],

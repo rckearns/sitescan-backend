@@ -255,6 +255,29 @@ class Contractor(Base):
     user = relationship("User", back_populates="contractors")
 
 
+class DirectoryEntry(Base):
+    """A licensed contractor from an external directory (SC LLR, ABC Carolinas, etc.)."""
+    __tablename__ = "directory_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(50), nullable=False)          # "sc-llr"
+    external_id = Column(String(100), nullable=False)    # license number
+    company_name = Column(String(255), nullable=False)
+    city = Column(String(100), default="")
+    state = Column(String(10), default="SC")
+    phone = Column(String(50), default="")
+    classification = Column(String(50), default="")      # SC LLR code: "CT", "MS", "SF", etc.
+    trade_label = Column(String(100), default="")        # human label: "Concrete", "Masonry"
+    license_status = Column(String(50), default="")      # "ACTIVE", "INACTIVE", "LAPSED"
+    license_expires = Column(String(50), default="")
+    last_scraped = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", "classification", name="uq_dir_source_ext_class"),
+    )
+
+
 class ScanLog(Base):
     """Log of automated scan runs."""
     __tablename__ = "scan_logs"
@@ -333,6 +356,23 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            # directory_entries — created via create_all; migration only needed for existing DBs
+            """CREATE TABLE IF NOT EXISTS directory_entries (
+                id SERIAL PRIMARY KEY,
+                source VARCHAR(50) NOT NULL,
+                external_id VARCHAR(100) NOT NULL,
+                company_name VARCHAR(255) NOT NULL,
+                city VARCHAR(100) DEFAULT '',
+                state VARCHAR(10) DEFAULT 'SC',
+                phone VARCHAR(50) DEFAULT '',
+                classification VARCHAR(50) DEFAULT '',
+                trade_label VARCHAR(100) DEFAULT '',
+                license_status VARCHAR(50) DEFAULT '',
+                license_expires VARCHAR(50) DEFAULT '',
+                last_scraped TIMESTAMP DEFAULT NOW(),
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(source, external_id, classification)
+            )""",
         ]
         for sql in migrations:
             try:

@@ -59,14 +59,24 @@ CLASSIFICATION_MAP: dict[str, str] = {
 
 # Classifications to scrape when doing a "full" directory refresh
 DEFAULT_CLASSIFICATIONS = [
+    "BD",   # Building (General Contractor)
+    "CCM",  # Construction Manager
     "CT",   # Concrete
+    "CP",   # Concrete Paving
     "MS",   # Masonry
     "SF",   # Structural Framing
     "WF",   # Wood Frame Structures
+    "MM",   # Miscellaneous Metals
     "NR",   # Nonstructural Renovation (drywall, finishes)
     "GD",   # Grading
+    "AP",   # Asphalt Paving
     "RF",   # Roofing
     "GG",   # Glass & Glazing
+    "EL",   # Electrical
+    "PB",   # Plumbing
+    "AC",   # Air Conditioning
+    "HT",   # Heating
+    "RG",   # Refrigeration
 ]
 
 # Charleston-area cities to query (LLR is exact-match on city name)

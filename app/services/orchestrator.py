@@ -137,18 +137,23 @@ async def run_source_scan(
                     projects = await scan_sam_gov(api_key=key, state=state, keywords=keywords)
 
             elif source_id == "charleston-permits":
-                # Fetch permit numbers that already have contractor data so the scanner
-                # can skip EnerGov for those — avoids re-enriching thousands of known
-                # permits every scan (which causes EnerGov rate-limiting after bulk runs).
+                # Only skip EnerGov re-enrichment for permits that are fully settled
+                # (first seen > 6 months ago AND already have contractor data).
+                # Active/recent permits are re-enriched every scan because sub contacts
+                # get added to EnerGov permit records over time as subs register their
+                # own sub-permits — skipping them permanently means missing those subs.
+                from datetime import timedelta
+                six_months_ago = datetime.utcnow() - timedelta(days=180)
                 existing_result = await session.execute(
                     select(Project.permit_number).where(
                         Project.source_id == "charleston-permits",
                         Project.contractor != None,
                         Project.contractor != "",
+                        Project.first_seen < six_months_ago,
                     )
                 )
                 known_permit_numbers: set[str] = {row[0] for row in existing_result.fetchall() if row[0]}
-                logger.info(f"charleston-permits: {len(known_permit_numbers)} permits already have contractor data, skipping EnerGov for those")
+                logger.info(f"charleston-permits: {len(known_permit_numbers)} settled permits skipping EnerGov; recent permits will be re-enriched")
                 projects = await scan_charleston_permits(
                     arcgis_url=settings.charleston_arcgis_url,
                     skip_energov_permit_numbers=known_permit_numbers,

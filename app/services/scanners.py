@@ -130,14 +130,12 @@ _ENERGOV_PERMIT_URL = (
 )
 
 
-async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) -> str:
-    """Look up all contractor names for a permit via the EnerGov CSS API.
-    Returns a pipe-delimited string of all Contractor contact names, or "" on any error.
-    Multi-contractor permits (e.g. GC + subs listed together) will return all names
-    so each contractor can be associated with this permit in the subcontractors view.
+async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) -> tuple[str, str]:
+    """Look up contractor and applicant/owner names for a permit via EnerGov CSS API.
+    Returns (contractors_str, applicant_str) where each is pipe-delimited or "".
     """
     if not pmpermitid:
-        return ""
+        return "", ""
     for attempt in range(3):
         try:
             resp = await client.get(
@@ -146,33 +144,41 @@ async def _fetch_energov_contractor(client: httpx.AsyncClient, pmpermitid: str) 
                 timeout=30.0,
             )
             if resp.status_code != 200:
-                return ""
+                return "", ""
             data = resp.json()
             result = data.get("Result") or {}
             contacts = result.get("Contacts") or []
-            # Collect all contacts typed "Contractor"
-            names: list[str] = []
+
+            contractor_names: list[str] = []
+            applicant_names: list[str] = []
             seen: set[str] = set()
+
             for contact in contacts:
-                if (contact.get("ContactTypeName") or "").lower() == "contractor":
-                    name = (contact.get("GlobalEntityName") or "").strip()
-                    if name and name not in seen:
-                        names.append(name)
-                        seen.add(name)
-            # Fall back to any contact with an entity name if no "Contractor" typed contacts
-            if not names:
+                ctype = (contact.get("ContactTypeName") or "").lower()
+                name = (contact.get("GlobalEntityName") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                if ctype == "contractor":
+                    contractor_names.append(name)
+                elif ctype in ("applicant", "owner", "property owner", "developer"):
+                    applicant_names.append(name)
+
+            # Fall back to any contact if no typed contractors found
+            if not contractor_names:
                 for contact in contacts:
                     name = (contact.get("GlobalEntityName") or "").strip()
                     if name and name not in seen:
-                        names.append(name)
+                        contractor_names.append(name)
                         seen.add(name)
-            return "|".join(names)
+
+            return "|".join(contractor_names), "|".join(applicant_names)
         except Exception as exc:
             if attempt < 2:
-                await asyncio.sleep(2 ** attempt)  # 1s, 2s
+                await asyncio.sleep(2 ** attempt)
             else:
                 logger.debug(f"EnerGov {pmpermitid} failed after 3 attempts: {exc}")
-    return ""
+    return "", ""
 
 
 async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_permit_numbers: Optional[set] = None, max_new_energov_calls: int = 500):
@@ -433,20 +439,24 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                     return await _fetch_energov_contractor(client, pid)
 
             logger.info(f"Fetching contractor data from EnerGov for {len(pids_to_fetch)} permits...")
-            fetched_contractors = await asyncio.gather(
+            fetched = await asyncio.gather(
                 *[fetch_with_semaphore(pid) for _, pid in pids_to_fetch]
             )
 
-            # Build full contractors list aligned with raw_records (empty string = preserve DB value)
+            # Build full lists aligned with raw_records (empty string = preserve DB value)
             contractors = [""] * len(pmpermitids)
-            for (i, _), contractor in zip(pids_to_fetch, fetched_contractors):
+            applicants  = [""] * len(pmpermitids)
+            for (i, _), (contractor, applicant) in zip(pids_to_fetch, fetched):
                 contractors[i] = contractor
+                applicants[i]  = applicant
 
             enriched = sum(1 for c in contractors if c)
             logger.info(f"EnerGov enrichment: {enriched}/{len(pmpermitids)} permits have contractor data")
 
-            for record, contractor in zip(raw_records, contractors):
+            for record, contractor, applicant in zip(raw_records, contractors, applicants):
                 record["contractor"] = contractor
+                if applicant:
+                    record["agency"] = applicant  # owner/applicant → agency field
                 results.append(record)
 
     except Exception as e:

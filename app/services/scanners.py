@@ -53,6 +53,11 @@ def _clean_text(text, max_len=2000):
 
 CONSTRUCTION_NAICS = ["236220", "236210", "238140", "238110", "238190"]
 
+# Building construction NAICS prefixes — 236xxx = building contractors,
+# 238xxx = specialty trade contractors (framing, masonry, concrete, etc.).
+# 237xxx (civil/heavy) is intentionally excluded — roads, bridges, utilities.
+_BUILDING_NAICS_PREFIXES = ("236", "238")
+
 
 async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
     if not api_key:
@@ -67,7 +72,7 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
         "postedFrom": from_date.strftime("%m/%d/%Y"),
         "postedTo": today.strftime("%m/%d/%Y"),
         "ptype": "o,p,k",
-        "q": keywords or "building construction",
+        "naicsCode": ",".join(CONSTRUCTION_NAICS),
     }
     if state:
         params["state"] = state
@@ -88,6 +93,14 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
             total = data.get("totalRecords", "?")
             logger.info(f"SAM.gov: {total} total records returned")
             for opp in data.get("opportunitiesData", []):
+                # Drop records whose actual NAICS isn't building construction.
+                # Some agencies (e.g. JBC) tag unrelated solicitations with
+                # construction NAICS, so we verify the solicitation's own code.
+                actual_naics = str(opp.get("naicsCode") or "")
+                if actual_naics and not actual_naics.startswith(_BUILDING_NAICS_PREFIXES):
+                    logger.debug(f"SAM.gov skip non-construction NAICS {actual_naics}: {opp.get('title','')[:60]}")
+                    continue
+
                 title = _clean_text(opp.get("title", ""), 500)
                 desc = ""
                 if isinstance(opp.get("description"), dict):
@@ -95,6 +108,10 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
                 elif isinstance(opp.get("description"), str):
                     desc = _clean_text(opp["description"])
                 cat = classify_project(title, desc)
+                # SAM.gov records with confirmed 236xxx NAICS are building
+                # construction by definition — don't hide them as "residential".
+                if cat == "residential" and actual_naics.startswith("236"):
+                    cat = "government"
                 ms = 50  # scored dynamically per-user at request time
                 results.append({
                     "source_id": "sam-gov", "external_id": str(opp.get("noticeId", "")),
@@ -106,7 +123,7 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
                     "deadline": _parse_date(opp.get("responseDeadLine")),
                     "agency": _clean_text(opp.get("fullParentPathName", ""), 255),
                     "solicitation_number": opp.get("solicitationNumber", ""),
-                    "naics_code": ",".join(CONSTRUCTION_NAICS),
+                    "naics_code": actual_naics or ",".join(CONSTRUCTION_NAICS),
                     "source_url": f"https://sam.gov/opp/{opp.get('noticeId','')}/view",
                     "raw_data": opp,
                 })

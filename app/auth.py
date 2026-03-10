@@ -11,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-FIXED_SECRET = "sitescan-dev-key-2026"
 from app.models.database import User, get_db
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -34,13 +33,13 @@ def create_access_token(user_id: int, email: str) -> str:
         "email": email,
         "exp": expire,
     }
-    return jwt.encode(payload, FIXED_SECRET, algorithm="HS256")
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
 def decode_token(token: str) -> dict:
     settings = get_settings()
     try:
-        payload = jwt.decode(token, FIXED_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
         return payload
     except JWTError:
         raise HTTPException(
@@ -61,8 +60,7 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive")
     return user

@@ -7,14 +7,15 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.models.database import init_db, get_session_factory
-from app.routers import auth_router, projects_router, scan_router, contractors_router
+from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
 
@@ -128,20 +129,42 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow frontend access
+# CORS — restrict to known frontend origins
+_ALLOWED_ORIGINS = [
+    "https://www.yabodle.com",
+    "https://yabodle.com",
+    "https://yabodle.pages.dev",
+    "http://localhost:5173",   # Vite dev server
+    "http://localhost:3000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://[a-z0-9]+\.yabodle\.pages\.dev",
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+# Global exception handler — ensures unhandled exceptions return JSON with
+# CORS headers instead of Starlette's bare 500 (which strips headers).
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {str(exc)[:300]}"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
 
 # Mount routers
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(projects_router, prefix="/api/v1")
 app.include_router(scan_router, prefix="/api/v1")
 app.include_router(contractors_router, prefix="/api/v1")
+app.include_router(profile_router, prefix="/api/v1")
+app.include_router(directory_router, prefix="/api/v1")
 
 
 # ─── HEALTH CHECK ────────────────────────────────────────────────────────────
@@ -149,6 +172,9 @@ app.include_router(contractors_router, prefix="/api/v1")
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "sitescan-api", "version": "1.0.0"}
+
+
+
 
 
 @app.get("/")
@@ -159,4 +185,4 @@ async def root():
         "docs": "/docs",
         "health": "/health",
     }
-# force redeploy Thu Feb 26 09:59:24 EST 2026
+# force redeploy Thu Mar  5 2026

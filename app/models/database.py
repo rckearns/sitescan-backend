@@ -13,21 +13,116 @@ Base = declarative_base()
 
 # ─── MODELS ──────────────────────────────────────────────────────────────────
 
+class Organization(Base):
+    """Shared company profile — multiple users can belong to the same org."""
+    __tablename__ = "organizations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    legal_name = Column(String(255), default="")
+    entity_type = Column(String(50), default="")        # Corporation, LLC, Partnership, etc.
+    # Address
+    address_street = Column(String(255), default="")
+    address_city = Column(String(100), default="")
+    address_state = Column(String(10), default="SC")
+    address_zip = Column(String(20), default="")
+    # Contact
+    phone = Column(String(50), default="")
+    fax = Column(String(50), default="")
+    email = Column(String(255), default="")
+    website = Column(String(255), default="")
+    # License
+    contractor_license_number = Column(String(100), default="")
+    license_classifications = Column(JSON, default=list)    # ["General", "Masonry"]
+    # Insurance
+    insurance_company = Column(String(255), default="")
+    insurance_agent_name = Column(String(255), default="")
+    insurance_agent_phone = Column(String(50), default="")
+    # Bonding
+    bonding_company = Column(String(255), default="")
+    bonding_agent_name = Column(String(255), default="")
+    bonding_agent_phone = Column(String(50), default="")
+    bonding_capacity = Column(String(100), default="")      # e.g. "$5,000,000"
+    # Safety
+    emr = Column(String(20), default="")                    # Experience Modification Rate
+    safety_meeting_frequency = Column(String(100), default="")
+    # Compliance Y/N flags — {key: {value: "Yes"/"No", explanation: ""}}
+    compliance_flags = Column(JSON, default=dict)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    principals = relationship(
+        "OrgPrincipal", back_populates="org",
+        cascade="all, delete-orphan", order_by="OrgPrincipal.order",
+    )
+    project_refs = relationship("ProjectReference", back_populates="org", cascade="all, delete-orphan")
+    personnel = relationship("KeyPersonnel", back_populates="org", cascade="all, delete-orphan")
+    users = relationship("User", back_populates="org")
+
+
+class OrgPrincipal(Base):
+    """A principal/owner of the organization (Part II of SC OSE SOQ)."""
+    __tablename__ = "org_principals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    name = Column(String(255), default="")
+    title = Column(String(100), default="")
+    other_businesses = Column(Text, default="")
+    order = Column(Integer, default=0)
+
+    org = relationship("Organization", back_populates="principals")
+
+
+class ProjectReference(Base):
+    """A past project reference in the org portfolio (Part III-A of SC OSE SOQ)."""
+    __tablename__ = "project_references"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    ref_type = Column(String(20), default="general")    # "general" or "state"
+    project_name = Column(String(255), default="")
+    owner_name = Column(String(255), default="")
+    owner_contact = Column(String(255), default="")     # contact person name
+    owner_phone = Column(String(50), default="")
+    contract_value = Column(Float, nullable=True)
+    completion_date = Column(String(50), default="")    # free text: "March 2024"
+    description = Column(Text, default="")
+    scope_of_work = Column(Text, default="")
+    your_role = Column(String(50), default="")          # GC, Prime, Sub
+
+    org = relationship("Organization", back_populates="project_refs")
+
+
+class KeyPersonnel(Base):
+    """A key person (PM or Superintendent) in the org (Part III-B of SC OSE SOQ)."""
+    __tablename__ = "key_personnel"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    name = Column(String(255), default="")
+    role = Column(String(20), default="pm")             # "pm" or "super"
+    resume_summary = Column(Text, default="")
+    projects = Column(JSON, default=list)               # [{name, owner, value, role, completed}]
+
+    org = relationship("Organization", back_populates="personnel")
+
+
 class User(Base):
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), default="")
     company = Column(String(255), default="")
     phone = Column(String(50), default="")
-    
+
     # Notification preferences
     email_alerts = Column(Boolean, default=True)
     sms_alerts = Column(Boolean, default=False)
     min_match_score = Column(Integer, default=75)  # only alert if match >= this
-    
+
     # Scan preferences
     search_keywords = Column(Text, default="masonry restoration structural")
     search_location = Column(String(255), default="Charleston, SC")
@@ -41,15 +136,21 @@ class User(Base):
     criteria_categories = Column(JSON, default=list)       # e.g. ["commercial", "government"]
     criteria_statuses = Column(JSON, default=list)         # e.g. ["Open", "Accepting Bids"]
     criteria_sources = Column(JSON, default=list)          # e.g. ["sam-gov", "scbo"]
-    
+
     # API keys (encrypted in prod — stored plain for MVP)
     sam_gov_api_key = Column(String(255), default="")
     constructconnect_api_key = Column(String(255), default="")
-    
+
+    # Company profile link
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+
+    is_active = Column(Boolean, default=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
+    org = relationship("Organization", back_populates="users")
     saved_projects = relationship("SavedProject", back_populates="user", cascade="all, delete-orphan")
     alert_history = relationship("AlertHistory", back_populates="user", cascade="all, delete-orphan")
     contractors = relationship("Contractor", back_populates="user", cascade="all, delete-orphan")
@@ -154,6 +255,29 @@ class Contractor(Base):
     user = relationship("User", back_populates="contractors")
 
 
+class DirectoryEntry(Base):
+    """A licensed contractor from an external directory (SC LLR, ABC Carolinas, etc.)."""
+    __tablename__ = "directory_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(50), nullable=False)          # "sc-llr"
+    external_id = Column(String(100), nullable=False)    # license number
+    company_name = Column(String(255), nullable=False)
+    city = Column(String(100), default="")
+    state = Column(String(10), default="SC")
+    phone = Column(String(50), default="")
+    classification = Column(String(50), default="")      # SC LLR code: "CT", "MS", "SF", etc.
+    trade_label = Column(String(100), default="")        # human label: "Concrete", "Masonry"
+    license_status = Column(String(50), default="")      # "ACTIVE", "INACTIVE", "LAPSED"
+    license_expires = Column(String(50), default="")
+    last_scraped = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", "classification", name="uq_dir_source_ext_class"),
+    )
+
+
 class ScanLog(Base):
     """Log of automated scan runs."""
     __tablename__ = "scan_logs"
@@ -208,25 +332,71 @@ async def init_db():
     get_session_factory()  # ensures _engine is initialized
     is_postgres = "postgresql" in str(_engine.url)
 
+    # create_all in its own transaction — migrations run separately so a
+    # failed ALTER TABLE can't roll back the table creation.
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        if is_postgres:
-            # Widen naics_code from VARCHAR(20) → TEXT (safe no-op if already TEXT)
-            # NOTE: ALTER COLUMN TYPE is PostgreSQL-only — skip on SQLite
-            await conn.execute(text(
-                "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT"
-            ))
-            # Add scoring criteria columns if they don't exist yet
-            for col, typedef in [
-                ("criteria_min_value", "FLOAT"),
-                ("criteria_categories", "JSON"),
-                ("criteria_statuses", "JSON"),
-                ("criteria_sources", "JSON"),
-            ]:
-                await conn.execute(text(
-                    f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}"
-                ))
+    if is_postgres:
+        # Each migration in its own connection so a failure (e.g. column
+        # already exists with a constraint) doesn't abort the others.
+        migrations = [
+            "ALTER TABLE projects ALTER COLUMN naics_code TYPE TEXT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS address VARCHAR(500) DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS latitude FLOAT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS longitude FLOAT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS permit_number VARCHAR(100) DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS contractor TEXT DEFAULT ''",
+            "ALTER TABLE projects ALTER COLUMN contractor TYPE TEXT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_url VARCHAR(500) DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS raw_data JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_min_value FLOAT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_categories JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_statuses JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            # directory_entries — created via create_all; migration only needed for existing DBs
+            """CREATE TABLE IF NOT EXISTS directory_entries (
+                id SERIAL PRIMARY KEY,
+                source VARCHAR(50) NOT NULL,
+                external_id VARCHAR(100) NOT NULL,
+                company_name VARCHAR(255) NOT NULL,
+                city VARCHAR(100) DEFAULT '',
+                state VARCHAR(10) DEFAULT 'SC',
+                phone VARCHAR(50) DEFAULT '',
+                classification VARCHAR(50) DEFAULT '',
+                trade_label VARCHAR(100) DEFAULT '',
+                license_status VARCHAR(50) DEFAULT '',
+                license_expires VARCHAR(50) DEFAULT '',
+                last_scraped TIMESTAMP DEFAULT NOW(),
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(source, external_id, classification)
+            )""",
+        ]
+        for sql in migrations:
+            try:
+                async with _engine.begin() as conn:
+                    await conn.execute(text(sql))
+            except Exception as e:
+                # Column/type already correct — safe to ignore
+                import logging as _lg
+                _lg.getLogger("sitescan.db").warning(f"Migration skipped ({e.__class__.__name__}): {sql[:60]}")
+
+    # Startup diagnostics — log whether critical tables/columns exist
+    import logging as _lg
+    _dblog = _lg.getLogger("sitescan.db")
+    if is_postgres:
+        for check_sql, label in [
+            ("SELECT COUNT(*) FROM organizations", "organizations table"),
+            ("SELECT org_id FROM users LIMIT 0", "users.org_id column"),
+        ]:
+            try:
+                async with _engine.begin() as conn:
+                    await conn.execute(text(check_sql))
+                _dblog.info(f"DB check OK: {label}")
+            except Exception as e:
+                _dblog.warning(f"DB check FAILED: {label}: {e}")
 
 
 async def get_db():

@@ -11,7 +11,7 @@ from app.models.database import Project, ScanLog, User, get_session_factory
 from app.services.scanners import (
     scan_sam_gov, scan_charleston_permits, scan_scbo,
     scan_charleston_bids, scan_north_charleston_permits,
-    scan_mt_pleasant_permits, ALL_SCANNERS,
+    scan_mt_pleasant_permits, scan_charlotte_permits, ALL_SCANNERS,
 )
 from app.config import get_settings
 
@@ -212,6 +212,16 @@ async def run_source_scan(
 
             elif source_id == "charleston-city-bids":
                 projects = await scan_charleston_bids()
+
+            elif source_id == "charlotte-permits":
+                projects = await scan_charlotte_permits()
+                if len(projects) > 10:
+                    await session.execute(
+                        update(Project)
+                        .where(Project.source_id.in_(["charlotte-land-dev", "charlotte-cip", "charlotte-ncdot"]))
+                        .where(Project.is_active == True)
+                        .values(is_active=False)
+                    )
 
             total, new_count = await upsert_projects(session, projects)
 

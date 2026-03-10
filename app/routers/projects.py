@@ -68,6 +68,20 @@ async def list_projects(
     _HIDDEN_CATS = ["residential", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing", "structural", "painting"]
     conditions.append(Project.category.not_in(_HIDDEN_CATS))
 
+    # Exclude permit records older than 3 years — they're not actionable opportunities.
+    # Bid sources (SCBO, SAM.gov) are exempt since they're short-lived by nature.
+    from datetime import datetime, timedelta, timezone
+    _PERMIT_SOURCES = ["charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
+                       "charlotte-permits", "charlotte-land-dev"]
+    _cutoff = datetime.now(timezone.utc) - timedelta(days=3 * 365)
+    conditions.append(
+        or_(
+            Project.source_id.not_in(_PERMIT_SOURCES),
+            Project.posted_date.is_(None),
+            Project.posted_date >= _cutoff,
+        )
+    )
+
     if categories:
         cat_list = [c.strip() for c in categories.split(",")]
         conditions.append(Project.category.in_(cat_list))
@@ -345,12 +359,20 @@ async def project_stats(
     user: User = Depends(get_current_user),
 ):
     """Get summary statistics computed against the user's scoring criteria."""
-    # Fetch all active projects and score dynamically
+    from datetime import datetime, timedelta, timezone
+    _PERMIT_SOURCES = ["charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
+                       "charlotte-permits", "charlotte-land-dev"]
+    _cutoff = datetime.now(timezone.utc) - timedelta(days=3 * 365)
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
             Project.category.not_in(["residential", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing", "structural", "painting"]),
             Project.status.not_in(["Completed", "Void", "Cancelled"]),
+            or_(
+                Project.source_id.not_in(_PERMIT_SOURCES),
+                Project.posted_date.is_(None),
+                Project.posted_date >= _cutoff,
+            ),
         )
     )
     projects = result.scalars().all()

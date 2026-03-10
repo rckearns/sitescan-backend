@@ -41,6 +41,7 @@ class UserProfile(BaseModel):
     criteria_categories: list = []
     criteria_statuses: list = []
     criteria_sources: list = []
+    criteria_client_types: list = []
     created_at: datetime
 
     class Config:
@@ -66,6 +67,7 @@ class UserUpdate(BaseModel):
     criteria_categories: Optional[list] = None
     criteria_statuses: Optional[list] = None
     criteria_sources: Optional[list] = None
+    criteria_client_types: Optional[list] = None
 
 
 # ─── PROJECTS ────────────────────────────────────────────────────────────────

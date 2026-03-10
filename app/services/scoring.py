@@ -155,15 +155,24 @@ CATEGORY_PATTERNS = [
         r"victorian|greek\s*revival|art\s*deco",
         re.IGNORECASE,
     )),
-    ("masonry", re.compile(
-        r"masonry|mortar|brick|stone|concrete\s*block|stucco|repoint|"
-        r"tuckpoint|grout|cmu|veneer|parapet|chimney|lime\s*mortar",
+    ("healthcare", re.compile(
+        r"hospital|medical|clinic|health\s*care|healthcare|dental|physician|"
+        r"surgery|surgical|musc|pharmacy|urgent\s*care|ambulatory|"
+        r"patient|radiology|oncology|emergency\s*room|er\s*|"
+        r"cancer\s*center|heart\s*center|wellness\s*center",
         re.IGNORECASE,
     )),
-    ("structural", re.compile(
-        r"structur|foundation|reinforc|load[\s-]*bear|steel\s*beam|"
-        r"shoring|underpin|seismic|retaining\s*wall|pile|micropile|"
-        r"helical|shotcrete|carbon\s*fiber|demolit",
+    ("education", re.compile(
+        r"\bschool\b|university|college|campus|classroom|academic|"
+        r"library|k[\s-]*12|charter\s*school|elementary|middle\s*school|"
+        r"high\s*school|dormitor|student\s*housing|lecture\s*hall|"
+        r"research\s*facility|science\s*building",
+        re.IGNORECASE,
+    )),
+    ("renovation", re.compile(
+        r"renovati|upfit|up[\s-]*fit|tenant\s*improvement|\bTI\b|"
+        r"alteration|remodel|fit[\s-]*out|interior\s*improvement|"
+        r"build[\s-]*out|buildout|refurb|retrofit|repurpose",
         re.IGNORECASE,
     )),
     ("government", re.compile(
@@ -173,8 +182,8 @@ CATEGORY_PATTERNS = [
         re.IGNORECASE,
     )),
     ("commercial", re.compile(
-        r"commercial|office|retail|mixed[\s-]*use|warehouse|industrial|"
-        r"hotel|hospital|school|university|church|tenant\s*improvement",
+        r"commercial|mixed[\s-]*use|warehouse|industrial|"
+        r"hotel|church|shopping|plaza|strip\s*mall",
         re.IGNORECASE,
     )),
 ]
@@ -185,35 +194,43 @@ def classify_project(title: str, description: str = "") -> str:
 
     Priority order:
     1. Specific building types (hotel, multi-family, office, mixed-use, etc.)
-    2. Work-type categories (historic-restoration, masonry, structural, government)
-    3. Generic commercial catch-all
-    4. Residential (default — filtered out of the UI)
+    2. Work-type / use categories (historic-restoration, healthcare, education,
+       renovation, government, commercial)
+    3. Residential (default — filtered out of the UI)
     """
     # 1. Specific building type — gives us hotel / multi-family / office / etc.
     building_type = classify_building_type(title, description)
     if building_type and building_type != "single-family":
         return building_type
 
-    # 2. Work-type categories (ordered by specificity)
-    work_type_patterns = [
-        ("historic-restoration", CATEGORY_PATTERNS[0][1]),
-        ("masonry", CATEGORY_PATTERNS[1][1]),
-        ("structural", CATEGORY_PATTERNS[2][1]),
-        ("government", CATEGORY_PATTERNS[3][1]),
-    ]
-    for cat_id, pattern in work_type_patterns:
-        if pattern.search(f"{title} {description}"):
+    # 2. Work-type / use categories (ordered by specificity)
+    text = f"{title} {description}"
+    for cat_id, pattern in CATEGORY_PATTERNS:
+        if pattern.search(text):
             return cat_id
 
-    # 3. Generic commercial (broad catch-all)
-    if CATEGORY_PATTERNS[4][1].search(f"{title} {description}"):
-        return "commercial"
-
-    # 4. Default — residential (excluded from project list display)
+    # 3. Default — residential (excluded from project list display)
     return "residential"
 
 
 # ─── PROFILE-BASED MATCH SCORING ────────────────────────────────────────────
+
+_CLIENT_TYPE_SOURCES: dict[str, set[str]] = {
+    "developer": {
+        "charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
+        "charlotte-permits", "charlotte-land-dev",
+    },
+    "government": {
+        "sam-gov", "scbo", "charleston-city-bids",
+        "charlotte-cip", "charlotte-ncdot",
+    },
+}
+
+_CLIENT_TYPE_CATEGORIES: dict[str, set[str]] = {
+    "higher-ed": {"institutional"},
+    "broker":    {"commercial", "office", "retail"},
+}
+
 
 def score_against_profile(project, user) -> int:
     """Score a project 0–100 based on how many of the user's criteria it meets.
@@ -251,6 +268,21 @@ def score_against_profile(project, user) -> int:
     if source_criteria:
         criteria_total += 1
         if project.source_id in source_criteria:
+            criteria_met += 1
+
+    # ── Client type criterion ─────────────────────────────────────────────────
+    client_types = getattr(user, "criteria_client_types", None) or []
+    if client_types:
+        criteria_total += 1
+        matched = False
+        for ct in client_types:
+            if ct in _CLIENT_TYPE_SOURCES and project.source_id in _CLIENT_TYPE_SOURCES[ct]:
+                matched = True
+                break
+            if ct in _CLIENT_TYPE_CATEGORIES and project.category in _CLIENT_TYPE_CATEGORIES[ct]:
+                matched = True
+                break
+        if matched:
             criteria_met += 1
 
     if criteria_total == 0:

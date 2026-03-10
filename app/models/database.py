@@ -136,6 +136,7 @@ class User(Base):
     criteria_categories = Column(JSON, default=list)       # e.g. ["commercial", "government"]
     criteria_statuses = Column(JSON, default=list)         # e.g. ["Open", "Accepting Bids"]
     criteria_sources = Column(JSON, default=list)          # e.g. ["sam-gov", "scbo"]
+    criteria_client_types = Column(JSON, default=list)     # e.g. ["government", "higher-ed"]
 
     # API keys (encrypted in prod — stored plain for MVP)
     sam_gov_api_key = Column(String(255), default="")
@@ -354,6 +355,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_categories JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_statuses JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_client_types JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
             # directory_entries — created via create_all; migration only needed for existing DBs

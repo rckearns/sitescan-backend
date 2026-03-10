@@ -70,10 +70,10 @@ async def list_projects(
 
     # Exclude permit records older than 3 years — they're not actionable opportunities.
     # Bid sources (SCBO, SAM.gov) are exempt since they're short-lived by nature.
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     _PERMIT_SOURCES = ["charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
                        "charlotte-permits", "charlotte-land-dev"]
-    _cutoff = datetime.now(timezone.utc) - timedelta(days=3 * 365)
+    _cutoff = datetime.utcnow() - timedelta(days=3 * 365)
     conditions.append(
         or_(
             Project.source_id.not_in(_PERMIT_SOURCES),
@@ -359,10 +359,10 @@ async def project_stats(
     user: User = Depends(get_current_user),
 ):
     """Get summary statistics computed against the user's scoring criteria."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     _PERMIT_SOURCES = ["charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
                        "charlotte-permits", "charlotte-land-dev"]
-    _cutoff = datetime.now(timezone.utc) - timedelta(days=3 * 365)
+    _cutoff = datetime.utcnow() - timedelta(days=3 * 365)
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
@@ -383,11 +383,10 @@ async def project_stats(
     avg_match = round(sum(scores) / total, 1) if total else 0
     high_match = sum(1 for s in scores if s >= 80)
 
-    from datetime import datetime, timezone, timedelta
-    _week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    _week_ago = datetime.utcnow() - timedelta(days=7)
     new_this_week = sum(
         1 for p in projects
-        if p.posted_date and p.posted_date.replace(tzinfo=timezone.utc) > _week_ago
+        if p.posted_date and p.posted_date > _week_ago
     )
     bids_open = sum(1 for p in projects if p.status in ("Open", "Accepting Bids"))
 

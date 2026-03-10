@@ -361,6 +361,14 @@ async def project_stats(
     avg_match = round(sum(scores) / total, 1) if total else 0
     high_match = sum(1 for s in scores if s >= 80)
 
+    from datetime import datetime, timezone, timedelta
+    _week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    new_this_week = sum(
+        1 for p in projects
+        if p.posted_date and p.posted_date.replace(tzinfo=timezone.utc) > _week_ago
+    )
+    bids_open = sum(1 for p in projects if p.status in ("Open", "Accepting Bids"))
+
     by_source = {}
     for p in projects:
         by_source[p.source_id] = by_source.get(p.source_id, 0) + 1
@@ -383,6 +391,8 @@ async def project_stats(
         "total_pipeline_value": total_value,
         "avg_match_score": avg_match,
         "high_match_count": high_match,
+        "new_this_week": new_this_week,
+        "bids_open": bids_open,
         "by_source": by_source,
         "by_category": by_category,
         "last_scan_at": last_scan.started_at.isoformat() if last_scan else None,

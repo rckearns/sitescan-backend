@@ -296,6 +296,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
             _TRADE_PERMIT_RE = re.compile(
                 r"operational\s+permit|zoning\s+verification|fire\s+protection|"
                 r"fire\s+alarm|fire\s+suppression|sprinkler|subpermit|"
+                r"phasing\s+permit|phased\s+permit|"
                 r"electrical|plumbing|mechanical|gas\s+pipe|fuel\s+gas|"
                 r"low\s+voltage|sign\s+permit|temporary\s+use|roofing|painting|"
                 r"short[\s-]*term\s+rental",

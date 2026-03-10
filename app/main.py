@@ -134,6 +134,7 @@ _ALLOWED_ORIGINS = [
     "https://www.yabodle.com",
     "https://yabodle.com",
     "https://yabodle.pages.dev",
+    "https://rckearns.github.io",
     "http://localhost:5173",   # Vite dev server
     "http://localhost:3000",
 ]

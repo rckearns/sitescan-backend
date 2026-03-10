@@ -14,7 +14,7 @@ import os
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -125,7 +125,7 @@ async def list_directory_contractors(
     if city:
         q = q.where(DirectoryEntry.city.ilike(f"%{city}%"))
     if active_only:
-        q = q.where(DirectoryEntry.license_status == "ACTIVE")
+        q = q.where(DirectoryEntry.license_status.ilike("active"))
 
     q = q.order_by(DirectoryEntry.company_name).limit(limit)
     rows = (await db.scalars(q)).all()
@@ -177,6 +177,77 @@ async def trigger_llr_refresh(
         "cities": city_list,
         "message": f"Scraping {len(classes)} trade types × {len(city_list)} cities in background",
     }
+
+
+@router.post("/refresh-admin")
+async def trigger_llr_refresh_admin(
+    background_tasks: BackgroundTasks,
+    x_admin_token: str | None = Header(default=None),
+):
+    """Trigger LLR refresh without user auth — requires X-Admin-Token: <TWOCAPTCHA_API_KEY>."""
+    api_key = os.environ.get("TWOCAPTCHA_API_KEY", "")
+    if not api_key or x_admin_token != api_key:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    background_tasks.add_task(_run_llr_refresh, DEFAULT_CLASSIFICATIONS, DEFAULT_CITIES, api_key)
+    return {
+        "status": "started",
+        "message": f"Scraping {len(DEFAULT_CLASSIFICATIONS)} trade types × {len(DEFAULT_CITIES)} cities in background",
+    }
+
+
+@router.post("/import-admin")
+async def import_llr_records(
+    records: list[dict],
+    replace_all: bool = Query(default=False),
+    x_admin_token: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Import pre-scraped LLR records directly.
+    Used when Railway cannot reach the LLR site directly (cloud IP blocking).
+    Requires X-Admin-Token: <TWOCAPTCHA_API_KEY>.
+    Pass ?replace_all=true to clear all existing sc-llr records first.
+    """
+    api_key = os.environ.get("TWOCAPTCHA_API_KEY", "")
+    if not api_key or x_admin_token != api_key:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    if replace_all:
+        await db.execute(delete(DirectoryEntry).where(DirectoryEntry.source == "sc-llr"))
+        await db.commit()
+        log.info("LLR import-admin: cleared all existing sc-llr records")
+
+    upserted = 0
+    for r in records:
+        if not r.get("company_name") or not r.get("license_number"):
+            continue
+        existing = await db.scalar(
+            select(DirectoryEntry).where(
+                DirectoryEntry.source == "sc-llr",
+                DirectoryEntry.external_id == r["license_number"],
+                DirectoryEntry.classification == r.get("classification", ""),
+            )
+        )
+        if existing:
+            existing.license_status = r.get("license_status", "")
+            existing.license_expires = r.get("license_expires", "")
+            existing.last_scraped = datetime.utcnow()
+        else:
+            db.add(DirectoryEntry(
+                source="sc-llr",
+                external_id=r["license_number"],
+                company_name=r["company_name"],
+                city=r.get("city", ""),
+                state=r.get("state", "SC"),
+                classification=r.get("classification", ""),
+                trade_label=r.get("trade_label", ""),
+                license_status=r.get("license_status", ""),
+                license_expires=r.get("license_expires", ""),
+            ))
+            upserted += 1
+    await db.commit()
+    log.info("LLR import-admin: %d new records upserted (total %d)", upserted, len(records))
+    return {"status": "ok", "upserted": upserted, "total": len(records)}
 
 
 @router.get("/status")

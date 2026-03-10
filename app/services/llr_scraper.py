@@ -137,22 +137,21 @@ def _parse_results(html: str) -> list[dict[str, Any]]:
     """
     Parse the LLR results DataGrid.
 
-    The grid has columns:
-      Company Name | License # | City | State | Classification | Status | Expiration
+    Current grid columns (as of 2025):
+      License# | Status | Type | Last | First | Suffix | Business | City | State
     """
     rows: list[dict[str, Any]] = []
 
-    # Find the results table — it's inside a div with class "searchRes" or the
-    # GridView control ctl00_ContentPlaceHolder2_gv_results
+    # The gv_results id is ON the table element itself
     table_m = re.search(
-        r'id="ctl00_ContentPlaceHolder2_gv_results".*?<table[^>]*>(.*?)</table>',
+        r'<table(?=[^>]*id="ctl00_ContentPlaceHolder2_gv_results")[^>]*>(.*?)</table>',
         html,
         re.DOTALL | re.IGNORECASE,
     )
     if not table_m:
-        # Fall back: any table after "Record(s)" count
+        # Fall back: any table after the "X record(s)" count line
         table_m = re.search(
-            r'Record\(s\).*?<table[^>]*>(.*?)</table>',
+            r'record\(s\).*?<table[^>]*>(.*?)</table>',
             html,
             re.DOTALL | re.IGNORECASE,
         )
@@ -163,26 +162,37 @@ def _parse_results(html: str) -> list[dict[str, Any]]:
     trs = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.DOTALL | re.IGNORECASE)
 
     def cell_text(td: str) -> str:
-        return re.sub(r"<[^>]+>", "", td).strip()
+        # Replace <br/> with a space before stripping all tags
+        td = re.sub(r"<br\s*/?>", " ", td, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", td).strip()
+        # Decode common HTML entities
+        text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").replace("&#39;", "'").replace("&quot;", '"')
+        return text.strip()
 
     for tr in trs:
         cells = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL | re.IGNORECASE)
-        if len(cells) < 5:
+        if len(cells) < 7:
             continue
         texts = [cell_text(c) for c in cells]
-        # Skip header rows
-        if texts[0].lower() in ("company name", "licensee name", "name"):
-            continue
+        # columns: License# | Status | Type | Last | First | Suffix | Business | City | State
+        company = texts[6]  # Business name
+        # Some licensees are individuals with no business name — fall back to person name
+        if not company or company in ("\xa0", "&nbsp;"):
+            last = texts[3] if len(texts) > 3 else ""
+            first = texts[4] if len(texts) > 4 else ""
+            company = f"{first} {last}".strip() if (first or last) else ""
+        # Strip nbsp artifacts
+        company = company.replace("\xa0", "").strip()
         row = {
-            "company_name": texts[0],
-            "license_number": texts[1] if len(texts) > 1 else "",
-            "city": texts[2] if len(texts) > 2 else "",
-            "state": texts[3] if len(texts) > 3 else "SC",
-            "classification": texts[4] if len(texts) > 4 else "",
-            "license_status": texts[5] if len(texts) > 5 else "",
-            "license_expires": texts[6] if len(texts) > 6 else "",
+            "company_name": company,
+            "license_number": texts[0],
+            "city": texts[7].title() if len(texts) > 7 else "",
+            "state": texts[8].upper() if len(texts) > 8 else "SC",
+            "classification": texts[2] if len(texts) > 2 else "",
+            "license_status": texts[1].title() if len(texts) > 1 else "",
+            "license_expires": "",
         }
-        if row["company_name"]:
+        if row["company_name"] and row["license_number"]:
             rows.append(row)
     return rows
 
@@ -290,9 +300,11 @@ async def scrape_llr_contractors(
         )
         results = _parse_results(result_resp.text)
 
-        # Enrich each result with trade_label
+        # Enrich each result with trade_label and normalise classification to the
+        # search code (e.g. "WF") rather than the HTML description ("WOOD FRAME…")
         for r in results:
             r["trade_label"] = trade_label
+            r["classification"] = classification  # always store the search code
             r["source"] = "sc-llr"
             r["external_id"] = r.get("license_number", "")
 
@@ -333,10 +345,10 @@ async def scrape_llr_full(
                 # Small delay to be polite
                 await asyncio.sleep(2)
             except LLRSolveError as e:
-                log.warning("LLR captcha solve failed for %s/%s: %s", cls, city, e)
+                log.warning("LLR captcha solve failed for %s/%s: %s", cls, city, e, exc_info=True)
                 await asyncio.sleep(10)
             except Exception as e:
-                log.warning("LLR scrape error for %s/%s: %s", cls, city, e)
+                log.warning("LLR scrape error for %s/%s: [%s] %s", cls, city, type(e).__name__, e, exc_info=True)
 
     log.info("LLR full scrape complete: %d unique records", len(all_results))
     return all_results

@@ -129,22 +129,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — restrict to known frontend origins
-_ALLOWED_ORIGINS = [
-    "https://www.yabodle.com",
-    "https://yabodle.com",
-    "https://yabodle.pages.dev",
-    "https://rckearns.github.io",
-    "http://localhost:5173",   # Vite dev server
-    "http://localhost:3000",
-]
+# CORS — allow all origins (frontend is served from static hosting)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_ALLOWED_ORIGINS,
-    allow_origin_regex=r"https://[a-z0-9]+\.yabodle\.pages\.dev",
+    allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Global exception handler — ensures unhandled exceptions return JSON with

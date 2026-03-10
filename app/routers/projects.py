@@ -134,6 +134,8 @@ async def list_projects(
     for p, score in page:
         p_out = ProjectOut.model_validate(p)
         p_out.match_score = score
+        p_out.latitude = _safe_float(p_out.latitude)
+        p_out.longitude = _safe_float(p_out.longitude)
         projects_out.append(p_out)
 
     return ProjectListResponse(total=total, projects=projects_out)

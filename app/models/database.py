@@ -278,6 +278,18 @@ class DirectoryEntry(Base):
     )
 
 
+class ParcelAnalysis(Base):
+    """Cached AI analysis for a parcel (keyed by TMS)."""
+    __tablename__ = "parcel_analyses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tms = Column(String(50), nullable=False, unique=True, index=True)
+    parcel_data = Column(JSON, nullable=False)   # raw parcel properties sent for analysis
+    analysis = Column(JSON, nullable=False)      # generated analysis object
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ScanLog(Base):
     """Log of automated scan runs."""
     __tablename__ = "scan_logs"
@@ -356,6 +368,15 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            # parcel_analyses — created via create_all; migration only needed for existing DBs
+            """CREATE TABLE IF NOT EXISTS parcel_analyses (
+                id SERIAL PRIMARY KEY,
+                tms VARCHAR(50) NOT NULL UNIQUE,
+                parcel_data JSON NOT NULL,
+                analysis JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )""",
             # directory_entries — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS directory_entries (
                 id SERIAL PRIMARY KEY,

@@ -15,7 +15,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.models.database import init_db, get_session_factory
-from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router
+from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
 
@@ -166,6 +166,7 @@ app.include_router(scan_router, prefix="/api/v1")
 app.include_router(contractors_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(directory_router, prefix="/api/v1")
+app.include_router(analyze_router, prefix="/api/v1")
 
 
 # ─── HEALTH CHECK ────────────────────────────────────────────────────────────

@@ -54,9 +54,9 @@ def _build_prompt(parcel: dict) -> str:
     addr = " ".join(filter(None, [parcel.get("HOUSE", ""), parcel.get("STREET", "")]))
     if not addr:
         addr = "No street address (parcel only)"
-    land = parcel.get("LAND_APPR") or parcel.get("APPRVAL", 0)
-    imp = parcel.get("IMP_APPR", 0)
-    total = parcel.get("APPRVAL") or (land + imp)
+    land = float(parcel.get("LAND_APPR") or parcel.get("APPRVAL") or 0)
+    imp = float(parcel.get("IMP_APPR") or 0)
+    total = float(parcel.get("APPRVAL") or 0) or (land + imp)
     yr = parcel.get("YRBUILT", "unknown")
     genuse = parcel.get("GENUSE", "General Commercial")
     owner = parcel.get("OWNER", "Unknown")

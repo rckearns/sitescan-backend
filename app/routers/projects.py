@@ -205,6 +205,7 @@ async def map_parcels(
     east: float = Query(...),
     north: float = Query(...),
     limit: int = Query(800, ge=1, le=1000),
+    genuse: Optional[str] = Query(None, description="Filter by GENUSE substring, e.g. 'commercial'"),
     user: User = Depends(get_current_user),
 ):
     """Proxy parcel GeoJSON from Charleston ArcGIS to avoid browser CORS restrictions.
@@ -217,12 +218,19 @@ async def map_parcels(
         "https://gis.charleston-sc.gov/arcgis2/rest/services/"
         "External/Zoning/MapServer/26/query"
     )
+    # Build WHERE clause — allow simple GENUSE substring filter
+    if genuse:
+        safe = genuse.replace("'", "").replace(";", "")[:50]
+        where_clause = f"UPPER(GENUSE) LIKE UPPER('%{safe}%')"
+    else:
+        where_clause = "1=1"
     params = {
         "geometry": f"{west},{south},{east},{north}",
         "geometryType": "esriGeometryEnvelope",
         "inSR": "4326",
         "outSR": "4326",
         "outFields": "TMS,PARCELID,OWNER,STREET,HOUSE,GENUSE,YRBUILT,APPRVAL,IMP_APPR,LAND_APPR",
+        "where": where_clause,
         "f": "geojson",
         "resultRecordCount": str(limit),
     }

@@ -309,11 +309,20 @@ async def scheduled_scan_job():
         total_found = sum(l.projects_found for l in logs)
         total_new = sum(l.projects_new for l in logs)
         errors = [l for l in logs if l.status == "error"]
-        
+
         logger.info(
             f"=== Scheduled scan complete: {total_found} found, "
             f"{total_new} new, {len(errors)} errors ==="
         )
-        
+
+        # Re-run contractor cross-reference after scan so enriched directory
+        # data stays current with the latest permit records.
+        try:
+            from app.services.contractor_match import enrich_directory_with_permits
+            summary = await enrich_directory_with_permits()
+            logger.info("Post-scan contractor enrichment: %s", summary)
+        except Exception as e:
+            logger.warning("Post-scan contractor enrichment failed: %s", e)
+
     except Exception as e:
         logger.error(f"=== Scheduled scan failed: {e} ===")

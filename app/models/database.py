@@ -273,6 +273,13 @@ class DirectoryEntry(Base):
     last_scraped = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Permit cross-reference (populated by background enrichment task)
+    permit_count = Column(Integer, default=0)
+    total_permit_value = Column(Float, default=0.0)
+    last_permit_date = Column(DateTime, nullable=True)
+    matched_names = Column(JSON, default=list)           # permit contractor names that matched
+    enriched_at = Column(DateTime, nullable=True)        # when cross-ref last ran
+
     __table_args__ = (
         UniqueConstraint("source", "external_id", "classification", name="uq_dir_source_ext_class"),
     )
@@ -377,6 +384,12 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             )""",
+            # directory_entries permit cross-reference columns
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS permit_count INTEGER DEFAULT 0",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS total_permit_value FLOAT DEFAULT 0.0",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS last_permit_date TIMESTAMP",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS matched_names JSON",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP",
             # directory_entries — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS directory_entries (
                 id SERIAL PRIMARY KEY,

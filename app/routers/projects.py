@@ -168,7 +168,7 @@ async def map_points(
     result = await db.execute(
         select(Project).where(
             Project.is_active == True,
-            Project.category.not_in(["residential", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing", "structural", "painting"]),
+            Project.category.not_in(["residential", "multi-family", "mixed-use", "trade-permit", "electrical", "fire-sprinkler", "plumbing", "mechanical", "roofing", "structural", "painting"]),
             Project.status.not_in(["Completed", "Void", "Cancelled"]),
             Project.latitude.is_not(None),
             Project.longitude.is_not(None),

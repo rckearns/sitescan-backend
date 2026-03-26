@@ -273,9 +273,28 @@ class DirectoryEntry(Base):
     last_scraped = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Permit cross-reference (populated by background enrichment task)
+    permit_count = Column(Integer, default=0)
+    total_permit_value = Column(Float, default=0.0)
+    last_permit_date = Column(DateTime, nullable=True)
+    matched_names = Column(JSON, default=list)           # permit contractor names that matched
+    enriched_at = Column(DateTime, nullable=True)        # when cross-ref last ran
+
     __table_args__ = (
         UniqueConstraint("source", "external_id", "classification", name="uq_dir_source_ext_class"),
     )
+
+
+class ParcelAnalysis(Base):
+    """Cached AI analysis for a parcel (keyed by TMS)."""
+    __tablename__ = "parcel_analyses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tms = Column(String(50), nullable=False, unique=True, index=True)
+    parcel_data = Column(JSON, nullable=False)   # raw parcel properties sent for analysis
+    analysis = Column(JSON, nullable=False)      # generated analysis object
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ScanLog(Base):
@@ -356,6 +375,21 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            # parcel_analyses — created via create_all; migration only needed for existing DBs
+            """CREATE TABLE IF NOT EXISTS parcel_analyses (
+                id SERIAL PRIMARY KEY,
+                tms VARCHAR(50) NOT NULL UNIQUE,
+                parcel_data JSON NOT NULL,
+                analysis JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )""",
+            # directory_entries permit cross-reference columns
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS permit_count INTEGER DEFAULT 0",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS total_permit_value FLOAT DEFAULT 0.0",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS last_permit_date TIMESTAMP",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS matched_names JSON",
+            "ALTER TABLE directory_entries ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP",
             # directory_entries — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS directory_entries (
                 id SERIAL PRIMARY KEY,

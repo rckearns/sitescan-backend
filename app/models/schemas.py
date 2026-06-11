@@ -330,6 +330,48 @@ class SOQGenerateRequest(BaseModel):
     state_project_ids: list[int]    # up to 3
 
 
+# ─── BOARD PIPELINE ─────────────────────────────────────────────────────────
+
+class BoardProjectOut(BaseModel):
+    id: int
+    project_key: str
+    case_number: Optional[str] = None
+    tms: Optional[str] = None
+    address: Optional[str] = None
+    neighborhood: Optional[str] = None
+    council_district: Optional[int] = None
+    acreage: Optional[float] = None
+    owner: Optional[str] = None
+    applicant: Optional[str] = None
+    current_stage: Optional[str] = None
+    max_score: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class BoardProjectListResponse(BaseModel):
+    total: int
+    projects: list[BoardProjectOut]
+
+class BoardEventOut(BaseModel):
+    id: int
+    project_id: int
+    event_type: str
+    from_stage: Optional[str] = None
+    to_stage: Optional[str] = None
+    score: Optional[int] = None
+    created_at: datetime
+    project_address: Optional[str] = None
+    project_applicant: Optional[str] = None
+    project_neighborhood: Optional[str] = None
+
+class BoardEventListResponse(BaseModel):
+    total: int
+    events: list[BoardEventOut]
+
+
 # ─── SCAN ────────────────────────────────────────────────────────────────────
 
 class ScanTriggerResponse(BaseModel):

@@ -21,3 +21,7 @@ curl-cffi>=0.7.0
 docxtpl==0.18.0
 anthropic>=0.40.0
 pypdf>=4.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+pdfplumber>=0.11.0
+lxml>=5.0.0

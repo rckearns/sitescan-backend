@@ -293,7 +293,7 @@ class ParcelAnalysis(Base):
 class ScanLog(Base):
     """Log of automated scan runs."""
     __tablename__ = "scan_logs"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     source_id = Column(String(50), nullable=False)
     started_at = Column(DateTime, default=datetime.utcnow)
@@ -302,6 +302,99 @@ class ScanLog(Base):
     projects_found = Column(Integer, default=0)
     projects_new = Column(Integer, default=0)
     error_message = Column(Text, default="")
+
+
+# ─── BOARD AGENDA MODELS ─────────────────────────────────────────────────────
+
+class BoardAgenda(Base):
+    """A single Charleston board meeting agenda (PDF)."""
+    __tablename__ = "board_agendas"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    external_id = Column(String(100), unique=True, nullable=False)
+    board_code = Column(String(20), nullable=False)
+    meeting_date = Column(DateTime, nullable=False)
+    pdf_url = Column(Text, nullable=False)
+    title = Column(Text, default="")
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+    parse_ok = Column(Boolean, default=True)
+    item_count = Column(Integer, default=0)
+
+
+class BoardProject(Base):
+    """Rolled-up project record keyed by case number (or TMS fallback)."""
+    __tablename__ = "board_projects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_key = Column(String(255), unique=True, nullable=False)
+    case_number = Column(String(100), nullable=True)
+    tms = Column(String(100), nullable=True)
+    address = Column(Text, nullable=True)
+    neighborhood = Column(String(255), nullable=True)
+    council_district = Column(Integer, nullable=True)
+    acreage = Column(Float, nullable=True)
+    owner = Column(Text, nullable=True)
+    applicant = Column(Text, nullable=True)
+    current_stage = Column(String(50), nullable=True)
+    max_score = Column(Integer, default=0)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_board_projects_tms", "tms"),
+        Index("ix_board_projects_stage", "current_stage"),
+        Index("ix_board_projects_score", "max_score"),
+    )
+
+
+class BoardAgendaItem(Base):
+    """A single line-item parsed from a board agenda."""
+    __tablename__ = "board_agenda_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agenda_id = Column(Integer, ForeignKey("board_agendas.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(Integer, ForeignKey("board_projects.id"), nullable=True)
+    item_number = Column(Integer, nullable=True)
+    section = Column(Text, nullable=True)
+    address = Column(Text, nullable=True)
+    case_number = Column(String(100), nullable=True)
+    tms = Column(String(100), nullable=True)
+    neighborhood = Column(String(255), nullable=True)
+    council_district = Column(Integer, nullable=True)
+    acreage = Column(Float, nullable=True)
+    request_text = Column(Text, nullable=True)
+    owner = Column(Text, nullable=True)
+    applicant = Column(Text, nullable=True)
+    stage = Column(String(50), nullable=True)
+    score = Column(Integer, default=0)
+    tags = Column(JSON, default=list)
+    raw_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("agenda_id", "item_number", name="uq_agenda_item"),
+        Index("ix_board_items_case", "case_number"),
+        Index("ix_board_items_score", "score"),
+    )
+
+
+class BoardProjectEvent(Base):
+    """Stage-transition event for a board project — the alert trigger."""
+    __tablename__ = "board_project_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("board_projects.id", ondelete="CASCADE"), nullable=False)
+    event_type = Column(String(50), nullable=False)  # new_project / stage_change
+    from_stage = Column(String(50), nullable=True)
+    to_stage = Column(String(50), nullable=True)
+    agenda_id = Column(Integer, ForeignKey("board_agendas.id"), nullable=True)
+    score = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    notified_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_board_events_unnotified", "created_at"),
+    )
 
 
 # ─── DATABASE ENGINE ─────────────────────────────────────────────────────────
@@ -394,6 +487,74 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(source, external_id, classification)
             )""",
+            # board agenda monitoring tables
+            """CREATE TABLE IF NOT EXISTS board_agendas (
+                id BIGSERIAL PRIMARY KEY,
+                external_id TEXT UNIQUE NOT NULL,
+                board_code TEXT NOT NULL,
+                meeting_date DATE NOT NULL,
+                pdf_url TEXT NOT NULL,
+                title TEXT,
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                parse_ok BOOLEAN NOT NULL DEFAULT true,
+                item_count INT NOT NULL DEFAULT 0
+            )""",
+            """CREATE TABLE IF NOT EXISTS board_projects (
+                id BIGSERIAL PRIMARY KEY,
+                project_key TEXT UNIQUE NOT NULL,
+                case_number TEXT,
+                tms TEXT,
+                address TEXT,
+                neighborhood TEXT,
+                council_district INT,
+                acreage NUMERIC,
+                owner TEXT,
+                applicant TEXT,
+                current_stage TEXT,
+                max_score INT NOT NULL DEFAULT 0,
+                first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_board_projects_tms ON board_projects (tms)",
+            "CREATE INDEX IF NOT EXISTS idx_board_projects_stage ON board_projects (current_stage)",
+            "CREATE INDEX IF NOT EXISTS idx_board_projects_score ON board_projects (max_score DESC)",
+            """CREATE TABLE IF NOT EXISTS board_agenda_items (
+                id BIGSERIAL PRIMARY KEY,
+                agenda_id BIGINT NOT NULL REFERENCES board_agendas(id) ON DELETE CASCADE,
+                project_id BIGINT REFERENCES board_projects(id),
+                item_number INT,
+                section TEXT,
+                address TEXT,
+                case_number TEXT,
+                tms TEXT,
+                neighborhood TEXT,
+                council_district INT,
+                acreage NUMERIC,
+                request_text TEXT,
+                owner TEXT,
+                applicant TEXT,
+                stage TEXT,
+                score INT NOT NULL DEFAULT 0,
+                tags TEXT[] NOT NULL DEFAULT '{}',
+                raw_text TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (agenda_id, item_number)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_board_items_case ON board_agenda_items (case_number)",
+            "CREATE INDEX IF NOT EXISTS idx_board_items_score ON board_agenda_items (score DESC)",
+            """CREATE TABLE IF NOT EXISTS board_project_events (
+                id BIGSERIAL PRIMARY KEY,
+                project_id BIGINT NOT NULL REFERENCES board_projects(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                from_stage TEXT,
+                to_stage TEXT,
+                agenda_id BIGINT REFERENCES board_agendas(id),
+                score INT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                notified_at TIMESTAMPTZ
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_board_events_unnotified
+                ON board_project_events (created_at) WHERE notified_at IS NULL""",
         ]
         for sql in migrations:
             try:

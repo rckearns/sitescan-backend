@@ -5,3 +5,4 @@ from app.routers.contractors import router as contractors_router
 from app.routers.profile import router as profile_router
 from app.routers.directory import router as directory_router
 from app.routers.analyze import router as analyze_router
+from app.routers.boards import router as boards_router

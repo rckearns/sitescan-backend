@@ -18,6 +18,7 @@ from app.models.database import init_db, get_session_factory
 from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
+from sitescan_boards.pipeline import run_boards_scrape
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,21 @@ async def scan_and_alert():
     """Combined scan + alert job for the scheduler."""
     await scheduled_scan_job()
     await process_alerts()
+
+
+async def boards_scrape_job():
+    """Daily Charleston board agenda scrape job."""
+    logger.info("=== Board agendas scrape starting ===")
+    try:
+        summary = await run_boards_scrape()
+        logger.info(
+            "=== Board agendas scrape complete: %d discovered, %d new, "
+            "%d items, %d alerts ===",
+            summary["discovered"], summary["new_agendas"],
+            summary["items"], summary["alerts"],
+        )
+    except Exception as e:
+        logger.error("=== Board agendas scrape failed: %s ===", e)
 
 
 # ─── APP LIFECYCLE ───────────────────────────────────────────────────────────
@@ -104,6 +120,13 @@ async def lifespan(app: FastAPI):
         trigger=IntervalTrigger(hours=settings.scan_cron_hours),
         id="scheduled_scan",
         name="Scheduled opportunity scan",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        boards_scrape_job,
+        trigger=IntervalTrigger(hours=24),
+        id="boards_scrape",
+        name="Charleston board agendas scrape",
         replace_existing=True,
     )
     scheduler.start()

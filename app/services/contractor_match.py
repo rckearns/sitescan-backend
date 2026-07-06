@@ -293,7 +293,7 @@ _NAME_TRADE_PATTERNS: list[tuple[str, re.Pattern]] = [
         re.IGNORECASE,
     )),
     ("electrical", re.compile(
-        r"electric(?:al)?|wiring|power\s*systems",
+        r"electric(?:al)?|wiring|power\s*(?:systems|design|solutions|group|services)",
         re.IGNORECASE,
     )),
     ("plumbing", re.compile(

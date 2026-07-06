@@ -158,7 +158,7 @@ CATEGORY_PATTERNS = [
     ("healthcare", re.compile(
         r"hospital|medical|clinic|health\s*care|healthcare|dental|physician|"
         r"surgery|surgical|musc|pharmacy|urgent\s*care|ambulatory|"
-        r"patient|radiology|oncology|emergency\s*room|er\s*|"
+        r"patient|radiology|oncology|emergency\s*room|"
         r"cancer\s*center|heart\s*center|wellness\s*center",
         re.IGNORECASE,
     )),

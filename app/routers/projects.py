@@ -229,7 +229,7 @@ async def map_parcels(
         "geometryType": "esriGeometryEnvelope",
         "inSR": "4326",
         "outSR": "4326",
-        "outFields": "TMS,PARCELID,OWNER,STREET,HOUSE,GENUSE,YRBUILT,APPRVAL,IMP_APPR,LAND_APPR",
+        "outFields": "TMS,PARCELID,OWNER,STREET,HOUSE,GENUSE,YRBUILT,APPRVAL,IMP_APPR,LAND_APPR,GISACRES",
         "where": where_clause,
         "f": "geojson",
         "resultRecordCount": str(limit),

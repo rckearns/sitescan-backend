@@ -30,7 +30,7 @@ import io
 import logging
 import re
 from datetime import date
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -610,12 +610,18 @@ async def _download(client: httpx.AsyncClient, url: str) -> bytes:
 
 
 async def fetch_state_approval_events(
-    since: date, client: Optional[httpx.AsyncClient] = None
+    since: date,
+    client: Optional[httpx.AsyncClient] = None,
+    skip_urls: Optional[set] = None,
+    on_document: Optional[Callable[[str, str, date, int], None]] = None,
 ) -> List[PipelineEvent]:
     """Discover JBRC packages and SFAA minutes dated on/after `since`,
     download them one at a time and return Charleston-area events.
 
     A failure on one document (or one index page) is logged and skipped.
+    Documents whose URL is in ``skip_urls`` were read on an earlier run and are
+    not downloaded again; ``on_document(source, url, date, n_events)`` is called
+    for each document read successfully so the caller can remember it.
     """
     own_client = client is None
     if own_client:
@@ -635,7 +641,7 @@ async def fetch_state_approval_events(
         except Exception as exc:
             logger.warning("sfaa discovery failed: %s", exc)
 
-        docs = [(s, d) for s, d in docs if d[1] >= since]
+        docs = [(s, d) for s, d in docs if d[1] >= since and d[0] not in (skip_urls or ())]
         docs.sort(key=lambda sd: sd[1][1])
         for n, (source, (url, meeting, title)) in enumerate(docs):
             if n:
@@ -645,6 +651,8 @@ async def fetch_state_approval_events(
                 parsed = await asyncio.to_thread(parse_document, pdf, url, meeting, source)
                 logger.info("%s %s (%s): %d Charleston events", source, meeting, title, len(parsed))
                 events.extend(parsed)
+                if on_document:
+                    on_document(source, url, meeting, len(parsed))
             except Exception as exc:
                 logger.warning("%s document %s failed: %s", source, url, exc)
     finally:

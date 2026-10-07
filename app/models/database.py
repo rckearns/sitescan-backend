@@ -327,6 +327,19 @@ class PipelineProject(Base):
     events = relationship("PipelineEventRow", back_populates="project", order_by="PipelineEventRow.event_date")
 
 
+class PipelineDocument(Base):
+    """A source document (state package, minutes, board agenda) already downloaded and read,
+    so daily runs only process new postings."""
+    __tablename__ = "pipeline_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(40), nullable=False)
+    url = Column(String(1000), nullable=False, unique=True)
+    document_date = Column(DateTime, nullable=True)
+    event_count = Column(Integer, default=0)
+    processed_at = Column(DateTime, default=datetime.utcnow)
+
+
 class PipelineEventRow(Base):
     """A single dated signal for a pipeline project (approval, A/E ad, board item, solicitation)."""
     __tablename__ = "pipeline_events"

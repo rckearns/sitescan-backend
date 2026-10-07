@@ -2,15 +2,16 @@
 
 import asyncio
 import importlib
+import inspect
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional
 
 import anthropic
 from sqlalchemy import func, select
 
 from app.config import get_settings
-from app.models.database import PipelineEventRow, PipelineProject, get_session_factory
+from app.models.database import PipelineDocument, PipelineEventRow, PipelineProject, get_session_factory
 from app.services.parcel_analysis import _single_runner_lock
 from app.services.pipeline.classify import CLASSIFY_VERSION, classify_project
 from app.services.pipeline.store import store_events
@@ -21,6 +22,10 @@ _JOB_LOCK_KEY = 7_324_115_003
 CLASSIFY_CONCURRENCY = 3
 CLASSIFY_PER_RUN = 150
 
+# Sources that read whole documents remember them in pipeline_documents so daily
+# runs only download and parse new postings.
+DOCUMENT_SOURCES = {"jbrc", "board"}
+
 # (event source name, module, function, first-run lookback days, regular lookback days[, kwargs])
 # State approvals backfill far enough to catch projects approved over the last ~2 years.
 # Board items below score 50 (mostly residential / minor exterior work) are left out
@@ -28,7 +33,7 @@ CLASSIFY_PER_RUN = 150
 SOURCES = [
     ("jbrc", "app.services.pipeline.state_approvals", "fetch_state_approval_events", 830, 60),
     ("scbo-ae", "app.services.pipeline.scbo", "fetch_scbo_pipeline_events", 30, 4),
-    ("board", "app.services.pipeline.boards", "fetch_board_events", 365, 30, {"min_score": 50}),
+    ("board", "app.services.pipeline.boards", "fetch_board_events", 120, 30, {"min_score": 50}),
 ]
 
 
@@ -68,6 +73,11 @@ async def run_pipeline_job(
     return summary
 
 
+async def _known_document_urls(session_factory) -> set:
+    async with session_factory() as db:
+        return set((await db.execute(select(PipelineDocument.url))).scalars().all())
+
+
 async def _run(summary, sources, client, session_factory, today):
     for name, module, func_name, first_days, regular_days, *rest in sources:
         kwargs = rest[0] if rest else {}
@@ -76,6 +86,10 @@ async def _run(summary, sources, client, session_factory, today):
             summary["sources"][name] = "unavailable"
             continue
         days = regular_days if await _has_events(session_factory, name) else first_days
+        processed = []
+        if name in DOCUMENT_SOURCES and "on_document" in inspect.signature(fetch).parameters:
+            kwargs = {**kwargs, "skip_urls": await _known_document_urls(session_factory),
+                      "on_document": lambda src, url, d, n: processed.append((src, url, d, n))}
         try:
             events = await fetch(today - timedelta(days=days), **kwargs)
         except Exception as e:
@@ -84,7 +98,16 @@ async def _run(summary, sources, client, session_factory, today):
             continue
         async with session_factory() as db:
             changed = await store_events(db, events)
+            known = kwargs.get("skip_urls") or set()
+            for src, url, d, n in processed:
+                if url in known:   # re-read upcoming agenda: already recorded
+                    continue
+                known.add(url)
+                db.add(PipelineDocument(source=src, url=url[:1000], event_count=n,
+                                        document_date=datetime(d.year, d.month, d.day) if d else None))
             await db.commit()
+        if processed:
+            summary.setdefault("documents", {})[name] = len(processed)
         summary["sources"][name] = len(events)
         summary["events"] += len(events)
         summary["projects_changed"] += len(changed)

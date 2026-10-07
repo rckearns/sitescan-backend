@@ -181,12 +181,17 @@ def fetch_board_events_sync(
     max_agendas: Optional[int] = None,
     fetch_pdf: Optional[Callable[[str], bytes]] = None,
     refs: Optional[list] = None,
+    skip_urls: Optional[set] = None,
+    on_document: Optional[Callable[[str, str, date, int], None]] = None,
 ) -> List[PipelineEvent]:
     """Blocking version: discover -> download -> parse -> classify -> events.
 
     ``boards`` limits to board codes (e.g. {"BAR-L", "PC"}). ``refs`` and
     ``fetch_pdf`` can be injected (tests, or an integrator with its own
     discovery). Agendas that fail to download or parse are logged and skipped.
+    Agendas in ``skip_urls`` were read on an earlier run and are skipped once
+    their meeting has passed (upcoming agendas can still be amended).
+    ``on_document("board", url, meeting_date, n_events)`` is called per agenda read.
     """
     from sitescan_boards import poller
     from sitescan_boards.parser import parse_agenda_pdf
@@ -198,6 +203,9 @@ def fetch_board_events_sync(
     if boards:
         wanted = set(boards)
         refs = [r for r in refs if r.board_code in wanted]
+    if skip_urls:
+        today = date.today()
+        refs = [r for r in refs if not (r.pdf_url in skip_urls and r.meeting_date < today)]
     if max_agendas is not None:
         refs = refs[:max_agendas]
 
@@ -213,7 +221,10 @@ def fetch_board_events_sync(
         except Exception as exc:  # noqa: BLE001 - skip one bad agenda
             logger.warning("Board agenda %s failed: %s", ref.pdf_url, exc)
             continue
-        events.extend(agenda_items_to_events(ref, items, min_score=min_score))
+        new_events = agenda_items_to_events(ref, items, min_score=min_score)
+        events.extend(new_events)
+        if on_document:
+            on_document("board", ref.pdf_url, ref.meeting_date, len(new_events))
     logger.info("Boards pipeline: %d events from %d agendas", len(events), len(refs))
     return events
 

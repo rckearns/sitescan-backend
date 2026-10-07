@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.models.database import Base, PipelineEventRow, PipelineProject  # noqa: E402
+from app.models.database import Base, PipelineDocument, PipelineEventRow, PipelineProject  # noqa: E402
 from app.services.pipeline import job as pjob  # noqa: E402
 from app.services.pipeline.classify import CLASSIFY_VERSION, apply_classification, build_input  # noqa: E402
 from app.services.pipeline.events import PipelineEvent, normalize_pip, pip_project_key  # noqa: E402
@@ -35,7 +35,7 @@ async def _factory():
                                  connect_args={"check_same_thread": False})
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(
-            c, tables=[PipelineProject.__table__, PipelineEventRow.__table__]))
+            c, tables=[PipelineProject.__table__, PipelineEventRow.__table__, PipelineDocument.__table__]))
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -311,3 +311,31 @@ def test_project_title_is_newest_official_name_without_request_text():
             await db.commit()
             return (await db.execute(select(PipelineProject))).scalars().one()
     assert run(go()).title == "Project 205 New Construction"
+
+
+def test_documents_are_read_once_across_runs():
+    downloads = []
+
+    async def doc_source(since, skip_urls=None, on_document=None):
+        events = []
+        for url, pip in (("https://x/jbrc-a.pdf", "H15.9001"), ("https://x/jbrc-b.pdf", "H15.9002")):
+            if url in (skip_urls or ()):
+                continue
+            downloads.append(url)
+            events.append(PipelineEvent(source="jbrc", external_id=f"jbrc:{pip}", project_key=f"PIP:{pip}",
+                                        pip_number=pip, title=pip, event_date=date(2026, 6, 3), stage="phase1"))
+            on_document("jbrc", url, date(2026, 6, 3), 1)
+        return events
+
+    async def go():
+        f = await _factory()
+        src = [("jbrc", doc_source, None, 830, 60)]
+        first = await pjob.run_pipeline_job(sources=src, client=FakeClient(AI), session_factory=f, today=date(2026, 10, 7))
+        second = await pjob.run_pipeline_job(sources=src, client=FakeClient(AI), session_factory=f, today=date(2026, 10, 8))
+        async with f() as db:
+            docs = (await db.execute(select(PipelineDocument))).scalars().all()
+        return first, second, docs
+    first, second, docs = run(go())
+    assert downloads == ["https://x/jbrc-a.pdf", "https://x/jbrc-b.pdf"]   # nothing re-downloaded on run 2
+    assert first["documents"] == {"jbrc": 2} and "documents" not in second
+    assert len(docs) == 2 and all(d.event_count == 1 for d in docs)

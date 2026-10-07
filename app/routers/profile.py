@@ -1,4 +1,5 @@
 """Company profile endpoints — org info, project portfolio, key personnel, SOQ generation."""
+import logging
 
 from io import BytesIO
 
@@ -6,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +23,8 @@ from app.models.schemas import (
     SOQGenerateRequest,
 )
 from app.auth import get_current_user
+
+logger = logging.getLogger("sitescan.profile")
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
@@ -421,15 +425,29 @@ async def bid_assist(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    from app.services.bid_assist import generate_bid_narrative
+    from app.services.bid_assist import build_user_prompt, generate_bid_narrative, narrative_cache_key
+    from app.models.database import BidNarrative
+
+    user_prompt = build_user_prompt(org, req.rfq_text)
+    key = narrative_cache_key(user_prompt)
+    saved = (await db.execute(select(BidNarrative).where(BidNarrative.cache_key == key))).scalars().first()
+    if saved:
+        return {"narrative": saved.narrative, "cached": True}
+
     try:
-        narrative = generate_bid_narrative(org, req.rfq_text)
+        narrative = await generate_bid_narrative(user_prompt)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bid assist failed: {e}")
 
-    return {"narrative": narrative}
+    db.add(BidNarrative(cache_key=key, org_id=org_id, narrative=narrative))
+    try:
+        await db.flush()
+    except IntegrityError:   # same request finished twice at once; keep the first
+        await db.rollback()
+    logger.info(f"Bid narrative generated for org {org_id}")
+    return {"narrative": narrative, "cached": False}
 
 
 @router.post("/bid-assist/parse-pdf")

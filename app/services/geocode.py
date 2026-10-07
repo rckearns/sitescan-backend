@@ -111,6 +111,33 @@ def _static_lookup(location: str) -> Optional[Tuple[float, float]]:
 # ── Nominatim fallback ────────────────────────────────────────────────────────
 _cache: dict[str, Optional[Tuple[float, float]]] = {}
 _lock = asyncio.Lock()
+_MISS = object()
+
+
+async def _db_get(key: str):
+    """Saved lookup from geocode_cache, _MISS if never looked up (or DB unavailable)."""
+    try:
+        from sqlalchemy import select
+        from app.models.database import GeocodeEntry, get_session_factory
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(GeocodeEntry).where(GeocodeEntry.query == key[:500]))).scalars().first()
+        if row is None:
+            return _MISS
+        return (row.latitude, row.longitude) if row.latitude is not None else None
+    except Exception as exc:
+        logger.debug(f"geocode cache read skipped: {exc}")
+        return _MISS
+
+
+async def _db_put(key: str, result: Optional[Tuple[float, float]]) -> None:
+    try:
+        from app.models.database import GeocodeEntry, get_session_factory
+        async with get_session_factory()() as db:
+            db.add(GeocodeEntry(query=key[:500], latitude=result[0] if result else None,
+                                longitude=result[1] if result else None))
+            await db.commit()
+    except Exception as exc:   # duplicate from a concurrent lookup, or no DB: memory cache still works
+        logger.debug(f"geocode cache write skipped: {exc}")
 
 
 async def geocode(location: str, country: str = "us") -> Optional[Tuple[float, float]]:
@@ -133,11 +160,17 @@ async def geocode(location: str, country: str = "us") -> Optional[Tuple[float, f
     if key in _cache:
         return _cache[key]
 
+    saved = await _db_get(key)
+    if saved is not _MISS:
+        _cache[key] = saved
+        return saved
+
     async with _lock:
         if key in _cache:
             return _cache[key]
 
         result: Optional[Tuple[float, float]] = None
+        answered = False   # only remember real answers, not network errors
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.get(
@@ -151,6 +184,7 @@ async def geocode(location: str, country: str = "us") -> Optional[Tuple[float, f
                     headers={"User-Agent": "Yabodle/1.0 (sitescan geocoder; contact@yabodle.com)"},
                 )
                 data = resp.json()
+                answered = True
                 if data:
                     result = (float(data[0]["lat"]), float(data[0]["lon"]))
                     logger.info(f"Nominatim geocoded '{location}' → {result}")
@@ -159,6 +193,8 @@ async def geocode(location: str, country: str = "us") -> Optional[Tuple[float, f
         except Exception as exc:
             logger.warning(f"Nominatim geocode failed for '{location}': {exc}")
 
-        _cache[key] = result
+        if answered:
+            _cache[key] = result
+            await _db_put(key, result)
         await asyncio.sleep(1.1)  # Only sleeps when a real network call was made
         return result

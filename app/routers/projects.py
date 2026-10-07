@@ -1,9 +1,11 @@
 """Projects endpoints — list, filter, search, save, and manage opportunities."""
 
+import hashlib
+import json
 import math
 import statistics
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,18 +224,29 @@ async def map_parcels(
         raise HTTPException(status_code=502, detail=f"ArcGIS request failed: {e}")
 
 
+_home_body: dict = {"source": None, "body": b"", "etag": ""}
+
+
 @router.get("/home/parcels")
-async def home_parcels(user: User = Depends(get_current_user)):
+async def home_parcels(request: Request, user: User = Depends(get_current_user)):
     """Underutilized Charleston County commercial parcels for the Home page, best first.
 
     Point geometries (parcel centers) keep the payload small; the map draws outlines
-    from `/map/parcels`.
+    from `/map/parcels`. The ranked JSON is built once per parcel-list refresh and
+    sent with an ETag, so browsers that already have it get a 304 instead of ~1.7 MB.
     """
     try:
-        features = ranked_home_parcels(await fetch_home_parcel_features())
+        features = await fetch_home_parcel_features()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"County parcel request failed: {e}")
-    return {"type": "FeatureCollection", "features": features}
+    if _home_body["source"] is not features:
+        body = json.dumps({"type": "FeatureCollection", "features": ranked_home_parcels(features)},
+                          separators=(",", ":")).encode()
+        _home_body.update(source=features, body=body, etag=f'"{hashlib.sha256(body).hexdigest()[:32]}"')
+    headers = {"ETag": _home_body["etag"], "Cache-Control": "private, no-cache"}
+    if request.headers.get("if-none-match") == _home_body["etag"]:
+        return Response(status_code=304, headers=headers)
+    return Response(content=_home_body["body"], media_type="application/json", headers=headers)
 
 
 @router.get("/subcontractors", response_model=SubcontractorListResponse)

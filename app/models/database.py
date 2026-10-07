@@ -367,6 +367,38 @@ class PipelineEventRow(Base):
     project = relationship("PipelineProject", back_populates="events")
 
 
+class BidNarrative(Base):
+    """Saved Bid Assist output, keyed by a hash of the model + prompt (profile + RFQ)."""
+    __tablename__ = "bid_narratives"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cache_key = Column(String(64), nullable=False, unique=True, index=True)
+    org_id = Column(Integer, nullable=True, index=True)
+    narrative = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GeocodeEntry(Base):
+    """Remembered place-name -> coordinates lookups (survives restarts)."""
+    __tablename__ = "geocode_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(String(500), nullable=False, unique=True, index=True)
+    latitude = Column(Float, nullable=True)    # null = looked up, not found
+    longitude = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CachedPayload(Base):
+    """A saved copy of an expensive external fetch (e.g. the county parcel list)."""
+    __tablename__ = "cached_payloads"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(100), nullable=False, unique=True, index=True)
+    payload = Column(JSON, nullable=False)
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ParcelAnalysis(Base):
     """Cached AI analysis for a parcel (keyed by TMS)."""
     __tablename__ = "parcel_analyses"

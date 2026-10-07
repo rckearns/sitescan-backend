@@ -229,10 +229,25 @@ def discover() -> list[AgendaRef]:
     return sorted(seen.values(), key=lambda r: r.meeting_date, reverse=True)
 
 
+# Text agendas are ~100-200 KB. Some links are full meeting packets with
+# drawings (hundreds of MB) that would take many minutes to download and parse.
+MAX_AGENDA_BYTES = 20 * 1024 * 1024
+
+
 def fetch_pdf(url: str, session: requests.Session | None = None) -> bytes:
     s = session or _session()
-    resp = s.get(url, timeout=config.HTTP_TIMEOUT)
-    resp.raise_for_status()
-    if not resp.content[:5].startswith(b"%PDF"):
+    with s.get(url, timeout=config.HTTP_TIMEOUT, stream=True) as resp:
+        resp.raise_for_status()
+        declared = int(resp.headers.get("Content-Length") or 0)
+        if declared > MAX_AGENDA_BYTES:
+            raise ValueError(f"{url} is {declared // 1_000_000} MB; skipping (not a text agenda)")
+        chunks, size = [], 0
+        for chunk in resp.iter_content(chunk_size=256 * 1024):
+            size += len(chunk)
+            if size > MAX_AGENDA_BYTES:
+                raise ValueError(f"{url} exceeds {MAX_AGENDA_BYTES // 1_000_000} MB; skipping (not a text agenda)")
+            chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content[:5].startswith(b"%PDF"):
         raise ValueError(f"Response from {url} is not a PDF")
-    return resp.content
+    return content

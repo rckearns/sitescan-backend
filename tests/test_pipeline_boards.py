@@ -348,3 +348,29 @@ def test_discover_refs_range_and_past_years(monkeypatch):
                                                         date(this_year, 6, 30))] == [
         f"_0101{this_year}-1"]
     assert years == []
+
+
+def test_fetch_pdf_refuses_huge_packets(monkeypatch):
+    from sitescan_boards import poller
+
+    class Resp:
+        def __init__(self, headers, chunks):
+            self.headers, self._chunks = headers, chunks
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size): return iter(self._chunks)
+
+    class Session:
+        def __init__(self, resp): self.resp = resp
+        def get(self, *a, **k): return self.resp
+
+    import pytest
+    big = Resp({"Content-Length": str(poller.MAX_AGENDA_BYTES + 1)}, [])
+    with pytest.raises(ValueError, match="skipping"):
+        poller.fetch_pdf("https://x/a.pdf", Session(big))
+    undeclared = Resp({}, [b"%PDF" + b"x" * (poller.MAX_AGENDA_BYTES // 2)] * 3)
+    with pytest.raises(ValueError, match="exceeds"):
+        poller.fetch_pdf("https://x/b.pdf", Session(undeclared))
+    ok = Resp({"Content-Length": "9"}, [b"%PDF-1.7\n"])
+    assert poller.fetch_pdf("https://x/c.pdf", Session(ok)) == b"%PDF-1.7\n"

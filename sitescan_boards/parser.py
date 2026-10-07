@@ -41,6 +41,14 @@ OWNER_RE = re.compile(r"Owner:\s*(.+)", re.IGNORECASE)
 APPLICANT_RE = re.compile(r"Applicant:\s*(.+)", re.IGNORECASE)
 REQUEST_RE = re.compile(r"\bRequest(?:ing|s)?\b", re.IGNORECASE)
 SITE_VISIT_RE = re.compile(r"Site\s+visit\s+on", re.IGNORECASE)
+STATUS_PREFIX_RE = re.compile(
+    r"^\s*(DEFERRED|WITHDRAWN|CONTINUED|REMOVED|POSTPONED)\s*[|:\-–]\s*",
+    re.IGNORECASE,
+)
+MINUTES_ITEM_RE = re.compile(
+    r"^(?:request\s+)?(?:review|approval)\s+(?:of\s+)?(?:the\s+)?minutes",
+    re.IGNORECASE,
+)
 ZONING_CODE_RE = re.compile(r"\(([A-Z]{1,3}(?:-\d)?(?:/WH)?)\)")
 
 # Lines that are page furniture, not item content.
@@ -67,6 +75,7 @@ class AgendaItem:
     applicant: str | None = None
     raw_text: str = ""
     section: str | None = None       # e.g. "REZONINGS" on PC agendas
+    status: str | None = None        # "DEFERRED" / "WITHDRAWN" prefix, if any
     rezoning_to: list[str] = field(default_factory=list)
 
 
@@ -99,6 +108,14 @@ def _split_items(text: str) -> list[tuple[int, str, list[str], str | None]]:
             continue
         sec = section_re.match(line)
         if sec:
+            # A lettered section header ("A. MINUTES", "B. APPLICATIONS")
+            # always ends the open item. BAR agendas restart numbering in
+            # each section, so without this the first application ("1. 35
+            # Bee Street") looks like a stray numbered line inside the
+            # "1. Review of Minutes" item and gets merged into it.
+            if current is not None and current_meta is not None:
+                items.append((*current_meta, current, section))
+            current, current_meta = None, None
             section = sec.group(1).strip()
             continue
         if _is_furniture(line):
@@ -190,8 +207,16 @@ def parse_agenda_text(text: str) -> list[AgendaItem]:
     """Parse extracted agenda text into structured items."""
     out: list[AgendaItem] = []
     for number, address, lines, section in _split_items(text):
+        status = None
+        m = STATUS_PREFIX_RE.match(address)
+        if m:
+            status = m.group(1).upper()
+            address = address[m.end():].strip()
+        if (section or "").upper() == "MINUTES" or MINUTES_ITEM_RE.match(
+                address):
+            continue
         item = AgendaItem(item_number=number, address=address,
-                          section=section)
+                          section=section, status=status)
         _parse_body(item, lines)
         # Drop obvious non-items (procedural motions with no parcel data).
         if item.tms or item.case_number or item.request_text:

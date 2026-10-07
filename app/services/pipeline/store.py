@@ -31,6 +31,13 @@ def _as_datetime(d) -> Optional[datetime]:
     return None
 
 
+def project_title(event_title: str) -> str:
+    """'Project 205 New Construction (College of Charleston) – Establish Phase I…' -> 'Project 205 New Construction'."""
+    t = re.sub(r"\s+[–—-]\s+.*$", "", event_title or "").strip()
+    t = re.sub(r"\s*\([^()]*\)\s*$", "", t).strip()
+    return t or (event_title or "").strip()
+
+
 def street_pattern(address: str) -> Optional[str]:
     """'106 Coming Street, Charleston' -> '106 Coming' (house number + first street word)."""
     m = re.match(r"\s*(\d+[A-Za-z]?)\s+([A-Za-z][A-Za-z.'-]+)", address or "")
@@ -121,9 +128,10 @@ async def refresh_rollup(db: AsyncSession, project_id: int) -> None:
     dated = sorted([e for e in events if e.event_date], key=lambda e: e.event_date)
     latest = dated[-1] if dated else events[-1]
 
-    pip_events = [e for e in events if (e.extra or {}).get("pip_number")]
-    title_src = pip_events[-1] if pip_events else latest
-    project.title = (title_src.title or project.title or "")[:500]
+    by_date = sorted(events, key=lambda e: (e.event_date is None, e.event_date or datetime.min))
+    pip_events = [e for e in by_date if (e.extra or {}).get("pip_number")]
+    title_src = pip_events[-1] if pip_events else latest   # newest official name wins
+    project.title = (project_title(title_src.title) or project.title or "")[:500]
     project.pip_number = next(((e.extra or {}).get("pip_number") for e in reversed(pip_events)), project.pip_number or "")
     project.owner = next(((e.extra or {}).get("owner") for e in reversed(events) if (e.extra or {}).get("owner")), project.owner or "")
     project.address = next((e.address for e in events if e.address), project.address or "")

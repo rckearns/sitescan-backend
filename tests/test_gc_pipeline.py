@@ -288,3 +288,26 @@ def test_api_filters_by_user_profile():
     assert len(default["projects"][0]["events"]) == 4
     assert default["counts"] == {"match": 1, "unconfirmed": 0, "excluded": 1}
     assert len(everything["projects"]) == 2
+
+
+def test_project_title_is_newest_official_name_without_request_text():
+    from app.services.pipeline.store import project_title
+    assert project_title("Project 205 New Construction (College of Charleston) – Change Project Name") == "Project 205 New Construction"
+    assert project_title("Parking lot resurfacing") == "Parking lot resurfacing"
+
+    evs = [
+        PipelineEvent(source="jbrc", external_id="j", project_key="PIP:H15.9689", pip_number="H15.9689",
+                      title="Project 205 New Construction (College of Charleston) – Increase Phase I",
+                      event_date=date(2025, 6, 3), stage="phase1"),
+        PipelineEvent(source="sfaa", external_id="s", project_key="PIP:H15.9689", pip_number="H15.9689",
+                      title="St. Philip Housing Innovation District (College of Charleston) – Establish Phase I",
+                      event_date=date(2024, 6, 18), stage="phase1"),
+    ]
+
+    async def go():
+        f = await _factory()
+        async with f() as db:
+            await store_events(db, evs)
+            await db.commit()
+            return (await db.execute(select(PipelineProject))).scalars().one()
+    assert run(go()).title == "Project 205 New Construction"

@@ -137,6 +137,13 @@ class User(Base):
     criteria_statuses = Column(JSON, default=list)         # e.g. ["Open", "Accepting Bids"]
     criteria_sources = Column(JSON, default=list)          # e.g. ["sam-gov", "scbo"]
 
+    # GC opportunity preferences (Home → General Contractors)
+    gc_delivery_methods = Column(JSON, default=lambda: ["cmr", "design-build", "qualifications"])
+    gc_exclude_wood_frame = Column(Boolean, default=True)
+    gc_min_value = Column(Float, default=1_000_000)
+    gc_project_types = Column(JSON, default=list)   # empty = any, e.g. ["higher-ed", "healthcare"]
+    gc_show_unconfirmed = Column(Boolean, default=True)
+
     # API keys (encrypted in prod — stored plain for MVP)
     sam_gov_api_key = Column(String(255), default="")
     constructconnect_api_key = Column(String(255), default="")
@@ -283,6 +290,81 @@ class DirectoryEntry(Base):
     __table_args__ = (
         UniqueConstraint("source", "external_id", "classification", name="uq_dir_source_ext_class"),
     )
+
+
+class PipelineProject(Base):
+    """One construction project tracked from early signals to solicitation (GC pipeline)."""
+    __tablename__ = "pipeline_projects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_key = Column(String(120), nullable=False, unique=True, index=True)  # e.g. "PIP:H15.9689"
+    title = Column(String(500), default="")
+    owner = Column(String(255), default="")
+    pip_number = Column(String(20), default="", index=True)
+    address = Column(String(500), default="")
+    city = Column(String(120), default="")
+    current_stage = Column(String(40), default="other")
+    first_event_date = Column(DateTime, nullable=True)
+    last_event_date = Column(DateTime, nullable=True)
+    next_deadline = Column(DateTime, nullable=True)
+
+    # Resolved classification (stated in a document beats the AI's inference)
+    delivery_method = Column(String(30), default="")        # cmr / design-build / qualifications / design-bid-build / ""
+    delivery_basis = Column(String(20), default="unknown")  # stated / inferred / unknown
+    construction_type = Column(String(20), default="unknown")  # non-wood / wood / unknown
+    construction_reason = Column(Text, default="")
+    building_type = Column(String(40), default="")          # higher-ed, healthcare, k12, government, commercial, ...
+    estimate = Column(Float, nullable=True)
+    estimate_basis = Column(String(20), default="unknown")  # stated / inferred / unknown
+    in_charleston_area = Column(Boolean, nullable=True)
+    summary = Column(Text, default="")
+
+    ai_version = Column(Integer, default=0)
+    needs_classification = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    events = relationship("PipelineEventRow", back_populates="project", order_by="PipelineEventRow.event_date")
+
+
+class PipelineDocument(Base):
+    """A source document (state package, minutes, board agenda) already downloaded and read,
+    so daily runs only process new postings."""
+    __tablename__ = "pipeline_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(40), nullable=False)
+    url = Column(String(1000), nullable=False, unique=True)
+    document_date = Column(DateTime, nullable=True)
+    event_count = Column(Integer, default=0)
+    processed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PipelineEventRow(Base):
+    """A single dated signal for a pipeline project (approval, A/E ad, board item, solicitation)."""
+    __tablename__ = "pipeline_events"
+    __table_args__ = (UniqueConstraint("source", "external_id", name="uq_pipeline_event_source_ext"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("pipeline_projects.id"), nullable=False, index=True)
+    source = Column(String(40), nullable=False)
+    external_id = Column(String(255), nullable=False)
+    stage = Column(String(40), default="other")
+    event_date = Column(DateTime, nullable=True)
+    title = Column(String(500), default="")
+    source_url = Column(String(1000), default="")
+    delivery_method = Column(String(30), default="")
+    estimate = Column(Float, nullable=True)
+    cost_low = Column(Float, nullable=True)
+    cost_high = Column(Float, nullable=True)
+    deadline = Column(DateTime, nullable=True)
+    location = Column(String(255), default="")
+    address = Column(String(500), default="")
+    text = Column(Text, default="")
+    extra = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("PipelineProject", back_populates="events")
 
 
 class ParcelAnalysis(Base):
@@ -468,6 +550,11 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_delivery_methods JSON DEFAULT '[\"cmr\", \"design-build\", \"qualifications\"]'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_exclude_wood_frame BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_min_value FLOAT DEFAULT 1000000",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_project_types JSON DEFAULT '[]'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_show_unconfirmed BOOLEAN DEFAULT TRUE",
             # parcel_analyses — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS parcel_analyses (
                 id SERIAL PRIMARY KEY,

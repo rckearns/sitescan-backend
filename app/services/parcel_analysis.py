@@ -257,7 +257,7 @@ async def save_analysis(db: AsyncSession, tms: str, parcel: dict, analysis: dict
 # ─── NIGHTLY JOB ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-async def _single_runner_lock(session_factory):
+async def _single_runner_lock(session_factory, key: int = _JOB_LOCK_KEY):
     """Postgres session advisory lock so only one replica runs the job at a time.
 
     Yields True if this process should run. Non-Postgres DBs (local sqlite)
@@ -270,13 +270,13 @@ async def _single_runner_lock(session_factory):
         return
     async with session_factory() as session:
         conn = await session.connection()
-        got = bool(await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": _JOB_LOCK_KEY}))
+        got = bool(await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}))
         try:
             yield got
         finally:
             if got:
                 try:
-                    await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _JOB_LOCK_KEY})
+                    await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
                     await session.commit()
                 except Exception as e:  # connection dropped -> lock already released
                     logger.warning(f"Parcel estimates: advisory unlock failed: {e}")

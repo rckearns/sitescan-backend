@@ -76,12 +76,10 @@ def _parse_link(href: str) -> tuple[date, str] | None:
     return meeting, external_id
 
 
-def discover_html(session: requests.Session | None = None) -> list[AgendaRef]:
-    """Scrape the AgendaCenter index page for agenda PDF links."""
-    s = session or _session()
-    resp = s.get(config.AGENDA_CENTER_URL, timeout=config.HTTP_TIMEOUT)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+def parse_index_html(html: str) -> list[AgendaRef]:
+    """Agenda refs from AgendaCenter HTML (the index page, or the fragment
+    returned by POST /AgendaCenter/UpdateCategoryList for a past year)."""
+    soup = BeautifulSoup(html, "html.parser")
 
     refs: list[AgendaRef] = []
     # CivicPlus renders one table/section per category, preceded by a header.
@@ -118,8 +116,69 @@ def discover_html(session: requests.Session | None = None) -> list[AgendaRef]:
                 title=link_text or header_text,
             )
         )
+    return refs
+
+
+def discover_html(session: requests.Session | None = None) -> list[AgendaRef]:
+    """Scrape the AgendaCenter index page for agenda PDF links."""
+    s = session or _session()
+    resp = s.get(config.AGENDA_CENTER_URL, timeout=config.HTTP_TIMEOUT)
+    resp.raise_for_status()
+    refs = parse_index_html(resp.text)
     log.info("HTML discovery found %d agenda refs", len(refs))
     return refs
+
+
+def discover_year(year: int, session: requests.Session | None = None,
+                  category_ids: dict | None = None) -> list[AgendaRef]:
+    """Agenda refs for a past (or current) year, one POST per category.
+
+    The AgendaCenter index only lists the current year; the page's
+    changeYear(year, catID) JavaScript loads other years from
+    POST /AgendaCenter/UpdateCategoryList with form fields year and catID.
+    """
+    s = session or _session()
+    cats = category_ids or config.CATEGORY_IDS
+    seen: dict[str, AgendaRef] = {}
+    for i, (name, cat_id) in enumerate(cats.items()):
+        if i:
+            time.sleep(config.REQUEST_DELAY_SECONDS)
+        try:
+            resp = s.post(
+                f"{config.AGENDA_CENTER_URL}/UpdateCategoryList",
+                data={"year": str(year), "catID": str(cat_id)},
+                timeout=config.HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            log.warning("Year %s discovery failed for %s: %s", year, name, exc)
+            continue
+        # The fragment has no category header, so fall back to the category
+        # name when the link text alone doesn't identify the board.
+        for ref in parse_index_html(resp.text):
+            seen.setdefault(ref.external_id, ref)
+        if _match_board(name):
+            for ref in _refs_by_category(resp.text, _match_board(name)):
+                seen.setdefault(ref.external_id, ref)
+    refs = sorted(seen.values(), key=lambda r: r.meeting_date, reverse=True)
+    log.info("Year %s discovery found %d agenda refs", year, len(refs))
+    return refs
+
+
+def _refs_by_category(html: str, board: str) -> list[AgendaRef]:
+    """Refs for every titled agenda link in a single-category fragment."""
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[AgendaRef] = []
+    for a in soup.find_all("a", href=AGENDA_LINK_RE):
+        title = a.get_text(" ", strip=True)
+        parsed = _parse_link(a["href"])
+        # Skip the bare "Agenda" download-menu duplicates and excluded docs.
+        if not parsed or not title or title.lower() == "agenda" or _excluded(title):
+            continue
+        out.append(AgendaRef(board_code=board, meeting_date=parsed[0],
+                             pdf_url=config.BASE_URL + a["href"],
+                             external_id=parsed[1], title=title))
+    return out
 
 
 def discover_rss(session: requests.Session | None = None) -> list[AgendaRef]:
@@ -170,10 +229,25 @@ def discover() -> list[AgendaRef]:
     return sorted(seen.values(), key=lambda r: r.meeting_date, reverse=True)
 
 
+# Text agendas are ~100-200 KB. Some links are full meeting packets with
+# drawings (hundreds of MB) that would take many minutes to download and parse.
+MAX_AGENDA_BYTES = 20 * 1024 * 1024
+
+
 def fetch_pdf(url: str, session: requests.Session | None = None) -> bytes:
     s = session or _session()
-    resp = s.get(url, timeout=config.HTTP_TIMEOUT)
-    resp.raise_for_status()
-    if not resp.content[:5].startswith(b"%PDF"):
+    with s.get(url, timeout=config.HTTP_TIMEOUT, stream=True) as resp:
+        resp.raise_for_status()
+        declared = int(resp.headers.get("Content-Length") or 0)
+        if declared > MAX_AGENDA_BYTES:
+            raise ValueError(f"{url} is {declared // 1_000_000} MB; skipping (not a text agenda)")
+        chunks, size = [], 0
+        for chunk in resp.iter_content(chunk_size=256 * 1024):
+            size += len(chunk)
+            if size > MAX_AGENDA_BYTES:
+                raise ValueError(f"{url} exceeds {MAX_AGENDA_BYTES // 1_000_000} MB; skipping (not a text agenda)")
+            chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content[:5].startswith(b"%PDF"):
         raise ValueError(f"Response from {url} is not a PDF")
-    return resp.content
+    return content

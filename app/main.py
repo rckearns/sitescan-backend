@@ -19,10 +19,11 @@ from apscheduler.triggers.date import DateTrigger
 
 from app.config import Settings, get_settings
 from app.models.database import init_db, get_session_factory
-from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router
+from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router, pipeline_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
 from app.services.parcel_analysis import run_parcel_estimates_job
+from app.services.pipeline.job import run_pipeline_job
 from sitescan_boards.pipeline import run_boards_scrape
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -62,6 +63,11 @@ async def boards_scrape_job():
         )
     except Exception as e:
         logger.error("=== Board agendas scrape failed: %s ===", e)
+
+
+async def gc_pipeline_job():
+    """Pull GC pipeline sources and classify changed projects (never raises)."""
+    await run_pipeline_job()
 
 
 async def parcel_estimates_job():
@@ -158,6 +164,23 @@ async def lifespan(app: FastAPI):
         name="Parcel AI estimates (startup)",
         replace_existing=True,
     )
+    # GC pipeline: daily at 09:30 UTC (after the parcel job) plus ~6 min after startup.
+    scheduler.add_job(
+        gc_pipeline_job,
+        trigger=CronTrigger(hour=9, minute=30, timezone="UTC"),
+        id="gc_pipeline_daily",
+        name="GC pipeline (daily)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        gc_pipeline_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(minutes=6)),
+        id="gc_pipeline_startup",
+        name="GC pipeline (startup)",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(f"Scheduler started — scanning every {settings.scan_cron_hours} hours")
     
@@ -222,6 +245,7 @@ app.include_router(profile_router, prefix="/api/v1")
 app.include_router(directory_router, prefix="/api/v1")
 app.include_router(analyze_router, prefix="/api/v1")
 app.include_router(boards_router, prefix="/api/v1")
+app.include_router(pipeline_router, prefix="/api/v1")
 
 
 # ─── HEALTH CHECK ────────────────────────────────────────────────────────────

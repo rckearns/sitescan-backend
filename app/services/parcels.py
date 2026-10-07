@@ -96,9 +96,21 @@ def _clean(v: Any) -> str:
     return re.sub(r"\s+", " ", str(v)).strip() if v is not None else ""
 
 
+# County PROP_CITY is free text with typos and variants; map them to one spelling.
+_CITY_ALIASES = {
+    "cityofcharleston": "Charleston",
+    "ncharleston": "North Charleston", "norhtcharleston": "North Charleston",
+    "northcharlesotn": "North Charleston", "northchas": "North Charleston",
+    "mtpleasant": "Mount Pleasant", "mountpl": "Mount Pleasant", "mtpl": "Mount Pleasant",
+    "mcclellanville": "McClellanville", "holllywood": "Hollywood",
+}
+
+
 def _normalize_city(v: Any) -> str:
-    city = _clean(v).title()
-    return re.sub(r"^Mt\.? ", "Mount ", city)
+    city = re.sub(r"\s+(sc|s\.c\.)?\s*\d{5}(-\d{4})?$|\s+sc$", "", _clean(v), flags=re.I)
+    city = city.title()
+    key = re.sub(r"[^a-z]", "", city.lower())
+    return _CITY_ALIASES.get(key, re.sub(r"^Mt\.? ", "Mount ", city))
 
 
 def _centroid(geometry: Optional[dict]) -> Optional[list[float]]:

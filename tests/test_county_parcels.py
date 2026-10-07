@@ -110,3 +110,13 @@ def test_home_features_are_cached(monkeypatch):
 
     asyncio.run(run())
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("CITY OF CHARLESTON", "Charleston"), ("FOLLY BEACH SC 29439", "Folly Beach"),
+    ("MC CLELLANVILLE", "McClellanville"), ("MT PL", "Mount Pleasant"), ("MT. PLEASANT", "Mount Pleasant"),
+    ("N CHARLESTON", "North Charleston"), ("NORHT CHARLESTON", "North Charleston"),
+    ("HOLLLYWOOD", "Hollywood"), ("JOHNS ISLAND", "Johns Island"), ("", ""),
+])
+def test_city_names_are_normalized(raw, expected):
+    assert parcels._normalize_city(raw) == expected

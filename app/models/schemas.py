@@ -41,6 +41,12 @@ class UserProfile(BaseModel):
     criteria_categories: list = []
     criteria_statuses: list = []
     criteria_sources: list = []
+    # GC opportunity preferences
+    gc_delivery_methods: Optional[list] = None
+    gc_exclude_wood_frame: Optional[bool] = None
+    gc_min_value: Optional[float] = None
+    gc_project_types: Optional[list] = None
+    gc_show_unconfirmed: Optional[bool] = None
     created_at: datetime
 
     class Config:
@@ -66,6 +72,12 @@ class UserUpdate(BaseModel):
     criteria_categories: Optional[list] = None
     criteria_statuses: Optional[list] = None
     criteria_sources: Optional[list] = None
+    # GC opportunity preferences
+    gc_delivery_methods: Optional[list] = None
+    gc_exclude_wood_frame: Optional[bool] = None
+    gc_min_value: Optional[float] = None
+    gc_project_types: Optional[list] = None
+    gc_show_unconfirmed: Optional[bool] = None
 
 
 # ─── PROJECTS ────────────────────────────────────────────────────────────────

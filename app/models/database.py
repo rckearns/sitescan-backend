@@ -137,6 +137,13 @@ class User(Base):
     criteria_statuses = Column(JSON, default=list)         # e.g. ["Open", "Accepting Bids"]
     criteria_sources = Column(JSON, default=list)          # e.g. ["sam-gov", "scbo"]
 
+    # GC opportunity preferences (Home → General Contractors)
+    gc_delivery_methods = Column(JSON, default=lambda: ["cmr", "design-build", "qualifications"])
+    gc_exclude_wood_frame = Column(Boolean, default=True)
+    gc_min_value = Column(Float, default=1_000_000)
+    gc_project_types = Column(JSON, default=list)   # empty = any, e.g. ["higher-ed", "healthcare"]
+    gc_show_unconfirmed = Column(Boolean, default=True)
+
     # API keys (encrypted in prod — stored plain for MVP)
     sam_gov_api_key = Column(String(255), default="")
     constructconnect_api_key = Column(String(255), default="")
@@ -468,6 +475,11 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS criteria_sources JSON",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_delivery_methods JSON DEFAULT '[\"cmr\", \"design-build\", \"qualifications\"]'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_exclude_wood_frame BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_min_value FLOAT DEFAULT 1000000",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_project_types JSON DEFAULT '[]'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_show_unconfirmed BOOLEAN DEFAULT TRUE",
             # parcel_analyses — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS parcel_analyses (
                 id SERIAL PRIMARY KEY,

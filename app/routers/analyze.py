@@ -5,9 +5,10 @@ import logging
 from typing import Any
 
 import anthropic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -61,6 +62,8 @@ def _build_prompt(parcel: dict) -> str:
     genuse = parcel.get("GENUSE", "General Commercial")
     owner = parcel.get("OWNER", "Unknown")
     tms = parcel.get("TMS") or parcel.get("PARCELID", "")
+    acres = parcel.get("GISACRES") or parcel.get("LGLACRES")
+    acres_line = f"\nLot Size: {float(acres):.2f} acres" if acres else ""
 
     return f"""Analyze this Charleston, SC commercial parcel:
 
@@ -71,10 +74,24 @@ Owner: {owner}
 Land Value: ${land:,.0f}
 Improvements Value: ${imp:,.0f}
 Total Appraised Value: ${total:,.0f}
-Year Built: {yr}
+Year Built: {yr}{acres_line}
 Improvement Ratio: {round(imp / total * 100) if total else 0}% (lower = more opportunity)
 
 Generate a highest-and-best-use analysis with 2-3 realistic development scenarios appropriate for this Charleston location."""
+
+
+@router.get("/parcels/cached")
+async def cached_parcel_analyses(
+    tms: str = Query(..., description="Comma-separated TMS numbers"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return already-generated analyses for the given parcels; never calls the AI."""
+    tms_list = [t.strip() for t in tms.split(",") if t.strip()][:500]
+    if not tms_list:
+        return {"analyses": {}}
+    result = await db.execute(select(ParcelAnalysis).where(ParcelAnalysis.tms.in_(tms_list)))
+    return {"analyses": {row.tms: row.analysis for row in result.scalars().all()}}
 
 
 @router.post("/parcel/{tms}")
@@ -97,8 +114,8 @@ async def analyze_parcel(
         raise HTTPException(status_code=503, detail="AI analysis not configured")
 
     try:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        message = client.messages.create(
+        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        message = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1500,
             system=_SYSTEM,
@@ -121,6 +138,11 @@ async def analyze_parcel(
     # Cache it
     record = ParcelAnalysis(tms=tms, parcel_data=payload.parcel, analysis=analysis)
     db.add(record)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        existing = (await db.execute(select(ParcelAnalysis).where(ParcelAnalysis.tms == tms))).scalar_one()
+        return {"tms": tms, "cached": True, "analysis": existing.analysis}
 
     return {"tms": tms, "cached": False, "analysis": analysis}

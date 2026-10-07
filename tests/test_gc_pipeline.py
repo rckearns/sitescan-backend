@@ -339,3 +339,41 @@ def test_documents_are_read_once_across_runs():
     assert downloads == ["https://x/jbrc-a.pdf", "https://x/jbrc-b.pdf"]   # nothing re-downloaded on run 2
     assert first["documents"] == {"jbrc": 2} and "documents" not in second
     assert len(docs) == 2 and all(d.event_count == 1 for d in docs)
+
+
+def test_board_item_skips_land_purchase_for_its_construction_companion():
+    land = [
+        PipelineEvent(source="sfaa", external_id="l1", project_key="PIP:H15.9688", pip_number="H15.9688",
+                      title="Project 205 Land Acquisition (College of Charleston) – Final Land Acquisition",
+                      event_date=date(2024, 12, 10), stage="land",
+                      text="The second parcel is +/-0.9 acres at 106 Coming Street and contains a parking lot"),
+    ]
+    construction = [
+        PipelineEvent(source="sfaa", external_id="c1", project_key="PIP:H15.9689", pip_number="H15.9689",
+                      title="Project 205 New Construction (College of Charleston) – Increase Phase I",
+                      event_date=date(2025, 6, 10), stage="phase1", delivery_method="cmr", estimate=164_800_000,
+                      text="Construction Manager at Risk. Student housing on the former YWCA site."),
+        # unrelated nearby number sharing no distinctive word
+        PipelineEvent(source="sfaa", external_id="c2", project_key="PIP:H15.9690", pip_number="H15.9690",
+                      title="Grice Marine Lab Annex Renovation (College of Charleston) – Phase II",
+                      event_date=date(2025, 6, 10), stage="phase2"),
+    ]
+
+    async def go():
+        f = await _factory()
+        async with f() as db:
+            await store_events(db, land + construction + [board_event()])
+            await db.commit()
+            rows = (await db.execute(
+                select(PipelineEventRow.source, PipelineProject.project_key).join(PipelineProject)
+            )).all()
+        return {src: key for src, key in rows if src == "board"}
+    assert run(go()) == {"board": "PIP:H15.9689"}
+
+
+def test_land_only_projects_are_excluded():
+    from app.services.pipeline.match import match_for_user
+    user = SimpleNamespace(gc_delivery_methods=None, gc_exclude_wood_frame=True, gc_min_value=1_000_000, gc_project_types=[])
+    land_only = SimpleNamespace(events=[SimpleNamespace(stage="land")], delivery_method="", construction_type="unknown",
+                                estimate=75_000_000, building_type="higher-ed", in_charleston_area=True)
+    assert match_for_user(land_only, user)[0] == "excluded"

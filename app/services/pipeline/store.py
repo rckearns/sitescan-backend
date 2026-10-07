@@ -46,18 +46,81 @@ def street_pattern(address: str) -> Optional[str]:
     return f"{m.group(1)} {m.group(2)}"
 
 
+# Words that don't identify a particular project when pairing a land purchase
+# with its construction project ("Project 205 Land Acquisition" ↔ "Project 205 New Construction").
+_GENERIC_TITLE_WORDS = {
+    "land", "acquisition", "preliminary", "final", "project", "new", "construction", "renovation",
+    "renovations", "phase", "the", "of", "and", "at", "for", "college", "charleston", "university",
+    "building", "buildings", "campus", "facility", "facilities", "improvements", "medical", "south",
+    "carolina", "musc", "citadel", "trident", "technical", "st", "street",
+}
+
+
+def _title_words(title: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", (title or "").lower()) if w not in _GENERIC_TITLE_WORDS}
+
+
+async def _event_titles(db: AsyncSession, project_id: int) -> list:
+    return (await db.execute(
+        select(PipelineEventRow.title).where(PipelineEventRow.project_id == project_id)
+    )).scalars().all()
+
+
+async def _stages(db: AsyncSession, project_id: int) -> set:
+    return set((await db.execute(
+        select(PipelineEventRow.stage).where(PipelineEventRow.project_id == project_id)
+    )).scalars().all())
+
+
+async def _construction_companion(db: AsyncSession, land: PipelineProject) -> Optional[PipelineProject]:
+    """The same agency's construction project for a land purchase: a nearby state
+    project number whose name shares a distinctive word (e.g. '205')."""
+    m = re.match(r"([A-Z]\d{2})\.(\d{4})$", land.pip_number or "")
+    if not m:
+        return None
+    agency, number = m.group(1), int(m.group(2))
+    land_words = set().union(*[_title_words(t) for t in await _event_titles(db, land.id)] or [set()])
+    candidates = (await db.execute(
+        select(PipelineProject).where(and_(
+            PipelineProject.pip_number.like(f"{agency}.%"), PipelineProject.id != land.id,
+        ))
+    )).scalars().all()
+    best = None
+    for c in candidates:
+        try:
+            distance = abs(int(c.pip_number.split(".")[1]) - number)
+        except (IndexError, ValueError):
+            continue
+        if distance > 5 or (await _stages(db, c.id)) <= {"land"}:
+            continue
+        shared = land_words & set().union(*[_title_words(t) for t in await _event_titles(db, c.id)] or [set()])
+        if shared and (best is None or distance < best[0]):
+            best = (distance, c)
+    return best[1] if best else None
+
+
 async def _find_project_by_address(db: AsyncSession, address: str) -> Optional[PipelineProject]:
-    """A state (PIP) project whose documents mention this street address."""
+    """A state (PIP) project whose documents mention this street address.
+
+    Prefers a construction project; if only a land purchase mentions the
+    address, the item goes to that purchase's construction companion.
+    """
     pattern = street_pattern(address)
     if not pattern:
         return None
-    rows = await db.execute(
-        select(PipelineProject)
+    matches = (await db.execute(
+        select(PipelineProject).distinct()
         .join(PipelineEventRow, PipelineEventRow.project_id == PipelineProject.id)
         .where(and_(PipelineProject.pip_number != "", PipelineEventRow.text.ilike(f"%{pattern}%")))
-        .limit(1)
-    )
-    return rows.scalars().first()
+    )).scalars().all()
+    for p in matches:
+        if not (await _stages(db, p.id)) <= {"land"}:
+            return p
+    for p in matches:
+        companion = await _construction_companion(db, p)
+        if companion:
+            return companion
+    return matches[0] if matches else None
 
 
 async def _get_or_create_project(db: AsyncSession, ev: PipelineEvent) -> PipelineProject:

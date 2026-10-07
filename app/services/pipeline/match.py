@@ -69,6 +69,9 @@ def match_project(
 
 
 def match_for_user(project, user) -> tuple:
+    stages = {e.stage for e in (getattr(project, "events", None) or [])}
+    if stages and stages <= {"land"}:
+        return "excluded", ["Land purchase only (no construction yet)"]
     return match_project(
         delivery_method=project.delivery_method or "",
         construction_type=project.construction_type or "unknown",

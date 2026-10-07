@@ -29,6 +29,7 @@ from app.models.schemas import (
 )
 from app.auth import get_current_user
 from app.services.scoring import score_against_profile
+from app.services.parcels import fetch_parcels_geojson
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -214,31 +215,9 @@ async def map_parcels(
     browser cannot call it directly. This endpoint fetches server-to-server and
     forwards the GeoJSON back to the client.
     """
-    arcgis_url = (
-        "https://gis.charleston-sc.gov/arcgis2/rest/services/"
-        "External/Zoning/MapServer/26/query"
-    )
-    # Build WHERE clause — allow simple GENUSE substring filter
-    if genuse:
-        safe = genuse.replace("'", "").replace(";", "")[:50]
-        where_clause = f"UPPER(GENUSE) LIKE UPPER('%{safe}%')"
-    else:
-        where_clause = "1=1"
-    params = {
-        "geometry": f"{west},{south},{east},{north}",
-        "geometryType": "esriGeometryEnvelope",
-        "inSR": "4326",
-        "outSR": "4326",
-        "outFields": "TMS,PARCELID,OWNER,STREET,HOUSE,GENUSE,YRBUILT,APPRVAL,IMP_APPR,LAND_APPR,GISACRES",
-        "where": where_clause,
-        "f": "geojson",
-        "resultRecordCount": str(limit),
-    }
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(arcgis_url, params=params)
-            resp.raise_for_status()
-            return Response(content=resp.content, media_type="application/geo+json")
+        content = await fetch_parcels_geojson(west, south, east, north, limit, genuse)
+        return Response(content=content, media_type="application/geo+json")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"ArcGIS request failed: {e}")
 

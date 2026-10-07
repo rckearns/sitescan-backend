@@ -5,6 +5,7 @@ Starts the API server and background scan scheduler.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -12,12 +13,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from app.config import get_settings
 from app.models.database import init_db, get_session_factory
 from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
+from app.services.parcel_analysis import run_parcel_estimates_job
 from sitescan_boards.pipeline import run_boards_scrape
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -59,6 +63,11 @@ async def boards_scrape_job():
         logger.error("=== Board agendas scrape failed: %s ===", e)
 
 
+async def parcel_estimates_job():
+    """Pre-generate AI estimates for the top Home page parcels (never raises)."""
+    await run_parcel_estimates_job()
+
+
 # ─── APP LIFECYCLE ───────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -81,7 +90,6 @@ async def lifespan(app: FastAPI):
     # On each restart we re-activate them so they remain visible while the
     # next scan runs and upserts them with fresh last_seen timestamps.
     try:
-        from datetime import datetime
         from sqlalchemy import update
         from app.models.database import Project
         session_factory = get_session_factory()
@@ -127,6 +135,24 @@ async def lifespan(app: FastAPI):
         trigger=IntervalTrigger(hours=24),
         id="boards_scrape",
         name="Charleston board agendas scrape",
+        replace_existing=True,
+    )
+    # Parcel estimates: daily at 08:30 UTC (~3:30/4:30am Charleston) plus once
+    # shortly after startup so a deploy fills in missing/stale estimates.
+    scheduler.add_job(
+        parcel_estimates_job,
+        trigger=CronTrigger(hour=8, minute=30, timezone="UTC"),
+        id="parcel_estimates_daily",
+        name="Parcel AI estimates (daily)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        parcel_estimates_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(minutes=3)),
+        id="parcel_estimates_startup",
+        name="Parcel AI estimates (startup)",
         replace_existing=True,
     )
     scheduler.start()

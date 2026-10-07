@@ -29,7 +29,7 @@ from app.models.schemas import (
 )
 from app.auth import get_current_user
 from app.services.scoring import score_against_profile
-from app.services.parcels import fetch_parcels_geojson
+from app.services.parcels import fetch_parcels_geojson, fetch_home_parcel_features, ranked_home_parcels
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -220,6 +220,20 @@ async def map_parcels(
         return Response(content=content, media_type="application/geo+json")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"ArcGIS request failed: {e}")
+
+
+@router.get("/home/parcels")
+async def home_parcels(user: User = Depends(get_current_user)):
+    """Underutilized Charleston County commercial parcels for the Home page, best first.
+
+    Point geometries (parcel centers) keep the payload small; the map draws outlines
+    from `/map/parcels`.
+    """
+    try:
+        features = ranked_home_parcels(await fetch_home_parcel_features())
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"County parcel request failed: {e}")
+    return {"type": "FeatureCollection", "features": features}
 
 
 @router.get("/subcontractors", response_model=SubcontractorListResponse)

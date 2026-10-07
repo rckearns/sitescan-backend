@@ -21,12 +21,14 @@ _JOB_LOCK_KEY = 7_324_115_003
 CLASSIFY_CONCURRENCY = 3
 CLASSIFY_PER_RUN = 150
 
-# (event source name, module, function, first-run lookback days, regular lookback days)
+# (event source name, module, function, first-run lookback days, regular lookback days[, kwargs])
 # State approvals backfill far enough to catch projects approved over the last ~2 years.
+# Board items below score 50 (mostly residential / minor exterior work) are left out
+# so the AI isn't asked about hundreds of irrelevant items.
 SOURCES = [
     ("jbrc", "app.services.pipeline.state_approvals", "fetch_state_approval_events", 830, 60),
     ("scbo-ae", "app.services.pipeline.scbo", "fetch_scbo_pipeline_events", 30, 4),
-    ("board", "app.services.pipeline.boards", "fetch_board_events", 365, 30),
+    ("board", "app.services.pipeline.boards", "fetch_board_events", 365, 30, {"min_score": 50}),
 ]
 
 
@@ -67,14 +69,15 @@ async def run_pipeline_job(
 
 
 async def _run(summary, sources, client, session_factory, today):
-    for name, module, func_name, first_days, regular_days in sources:
+    for name, module, func_name, first_days, regular_days, *rest in sources:
+        kwargs = rest[0] if rest else {}
         fetch = _load(module, func_name) if isinstance(module, str) else module
         if fetch is None:
             summary["sources"][name] = "unavailable"
             continue
         days = regular_days if await _has_events(session_factory, name) else first_days
         try:
-            events = await fetch(today - timedelta(days=days))
+            events = await fetch(today - timedelta(days=days), **kwargs)
         except Exception as e:
             logger.error(f"Pipeline source {name} failed: {e}")
             summary["sources"][name] = f"failed: {str(e)[:120]}"

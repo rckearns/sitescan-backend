@@ -202,6 +202,13 @@ async def run_boards_scrape() -> dict:
             try:
                 pdf = await asyncio.to_thread(poller.fetch_pdf, ref.pdf_url)
                 items = await asyncio.to_thread(parse_agenda_pdf, pdf)
+                # Agendas restart numbering per section ("A. ...", "B. ..."); keep
+                # item_number unique per agenda so ON CONFLICT doesn't drop items.
+                seen_numbers = set()
+                for i, it in enumerate(items, start=1):
+                    if it.item_number in seen_numbers:
+                        it.item_number = 1000 + i
+                    seen_numbers.add(it.item_number)
                 parse_ok = True
             except Exception as exc:
                 log.exception("Failed to fetch/parse %s: %s", ref.pdf_url, exc)

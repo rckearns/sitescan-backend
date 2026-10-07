@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     # App
     app_name: str = "SiteScan"
     app_env: str = "development"
+    sql_echo: bool = False  # log every SQL statement (local debugging only)
     secret_key: str = "sitescan-dev-key-2026-charleston-masonry-restore"
     api_host: str = "0.0.0.0"
     api_port: int = 8000

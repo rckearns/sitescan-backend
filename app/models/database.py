@@ -423,7 +423,7 @@ def get_engine():
     settings = get_settings()
     return create_async_engine(
         db_url,
-        echo=settings.app_env == "development",
+        echo=settings.sql_echo,
     )
 
 

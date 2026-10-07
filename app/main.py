@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.models.database import init_db, get_session_factory
 from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router
 from app.services.orchestrator import scheduled_scan_job
@@ -74,6 +74,8 @@ async def parcel_estimates_job():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    if get_settings().secret_key == Settings.model_fields["secret_key"].default:
+        logger.error("SECRET_KEY is the public default from the repo; anyone can forge login tokens. Set a random SECRET_KEY.")
     settings = get_settings()
     
     # Initialize database

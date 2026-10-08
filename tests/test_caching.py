@@ -49,7 +49,7 @@ def test_generate_bid_narrative_uses_async_client():
 
         async def create(self, **kw):
             self.kwargs = kw
-            return SimpleNamespace(content=[SimpleNamespace(text="Narrative")])
+            return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="Narrative")])
 
     fake = Fake()
     assert run(bid_assist.generate_bid_narrative("prompt", client=fake)) == "Narrative"

@@ -24,6 +24,7 @@ from app.config import get_settings
 from app.models.database import ParcelAnalysis, get_session_factory
 from app.services.parcels import fetch_home_parcel_features, rank_parcels, _js_parse_float
 from app.services.zoning import describe_zoning, lookup_parcel_zoning
+from app.services.ai_text import response_text
 
 logger = logging.getLogger("sitescan.parcel_analysis")
 
@@ -34,7 +35,9 @@ logger = logging.getLogger("sitescan.parcel_analysis")
 #     here. Prompt includes City zoning, height district and overlays.
 ANALYSIS_VERSION = 3
 DEFAULT_MODEL = "claude-sonnet-5-5"
-MAX_TOKENS = 3000
+# Thinking (on by default for Sonnet 5.5) counts toward max_tokens; leave room for it
+# plus the JSON answer. 16k is the recommended ceiling for non-streaming requests.
+MAX_TOKENS = 16000
 # A scenario "pencils" when profit on cost clears this (15%).
 PENCIL_THRESHOLD = 0.15
 ZONING_FITS = ("by_right", "needs_approval", "not_allowed")
@@ -269,7 +272,7 @@ async def generate_analysis(
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": build_prompt(parcel, zoning)}],
         )
-        raw = message.content[0].text
+        raw = response_text(message)
     except Exception as e:
         logger.error(f"Claude API error for TMS {tms}: {e}")
         raise AnalysisError(f"AI analysis failed: {str(e)[:200]}") from e

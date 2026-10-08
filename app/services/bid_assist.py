@@ -113,4 +113,5 @@ async def generate_bid_narrative(user_prompt: str, client=None) -> str:
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return message.content[0].text
+    from app.services.ai_text import response_text
+    return response_text(message)

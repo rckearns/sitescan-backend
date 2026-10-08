@@ -47,7 +47,7 @@ class FakeClient:
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(self.payload))])
+        return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps(self.payload))])
 
 
 def p205_events():

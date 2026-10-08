@@ -82,7 +82,9 @@ class FakeClient:
         self.peak = max(self.peak, self.active)
         await asyncio.sleep(self.delay)
         self.active -= 1
-        return SimpleNamespace(content=[SimpleNamespace(text=self.text)])
+        # Sonnet 5.5 thinks by default: the answer comes after a thinking block.
+        return SimpleNamespace(stop_reason="end_turn", content=[
+            SimpleNamespace(type="thinking", thinking=""), SimpleNamespace(type="text", text=self.text)])
 
 
 # ─── scoring / ranking ───────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import anthropic
 from app.config import get_settings
 from app.models.database import PipelineEventRow, PipelineProject
 from app.services.parcel_analysis import _parse_json
+from app.services.ai_text import response_text
 
 logger = logging.getLogger("sitescan.pipeline")
 
@@ -149,6 +150,6 @@ async def classify_project(project: PipelineProject, events: list, client: Optio
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_input(project, events)}],
     )
-    data = _parse_json(message.content[0].text)
+    data = _parse_json(response_text(message))
     apply_classification(project, data)
     return data

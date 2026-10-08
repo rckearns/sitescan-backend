@@ -130,12 +130,12 @@ async def _get_or_create_project(db: AsyncSession, ev: PipelineEvent) -> Pipelin
     if project is None and ev.source == "board" and ev.address:
         project = await _find_project_by_address(db, ev.address)
     if project is None:
-        project = PipelineProject(project_key=ev.project_key, title=ev.title[:500])
+        project = PipelineProject(project_key=ev.project_key[:120], title=(ev.title or "")[:500])
         db.add(project)
     # Set right away (not only in the rollup) so a board item later in the same
     # batch can find this state project by address.
     if ev.pip_number and not project.pip_number:
-        project.pip_number = ev.pip_number
+        project.pip_number = ev.pip_number[:20]
     await db.flush()
     return project
 
@@ -157,13 +157,13 @@ async def store_events(db: AsyncSession, events: Iterable[PipelineEvent]) -> set
         low, high = (ev.cost_range or (None, None))[:2] if ev.cost_range else (None, None)
         db.add(PipelineEventRow(
             project_id=project.id,
-            source=ev.source,
+            source=ev.source[:40],
             external_id=ev.external_id[:255],
             stage=ev.stage if ev.stage in STAGES else "other",
             event_date=_as_datetime(ev.event_date),
             title=(ev.title or "")[:500],
             source_url=(ev.source_url or "")[:1000],
-            delivery_method=ev.delivery_method or "",
+            delivery_method=(ev.delivery_method or "")[:30],
             estimate=ev.estimate,
             cost_low=low,
             cost_high=high,
@@ -195,10 +195,11 @@ async def refresh_rollup(db: AsyncSession, project_id: int) -> None:
     pip_events = [e for e in by_date if (e.extra or {}).get("pip_number")]
     title_src = pip_events[-1] if pip_events else latest   # newest official name wins
     project.title = (project_title(title_src.title) or project.title or "")[:500]
-    project.pip_number = next(((e.extra or {}).get("pip_number") for e in reversed(pip_events)), project.pip_number or "")
-    project.owner = next(((e.extra or {}).get("owner") for e in reversed(events) if (e.extra or {}).get("owner")), project.owner or "")
-    project.address = next((e.address for e in events if e.address), project.address or "")
-    project.city = next((e.location for e in reversed(events) if e.location), project.city or "")
+    # Trim to column sizes: Postgres rejects over-long values (SQLite in tests doesn't).
+    project.pip_number = (next(((e.extra or {}).get("pip_number") for e in reversed(pip_events)), project.pip_number or "") or "")[:20]
+    project.owner = (next(((e.extra or {}).get("owner") for e in reversed(events) if (e.extra or {}).get("owner")), project.owner or "") or "")[:255]
+    project.address = (next((e.address for e in events if e.address), project.address or "") or "")[:500]
+    project.city = (next((e.location for e in reversed(events) if e.location), project.city or "") or "")[:120]
     project.current_stage = latest.stage
     project.first_event_date = dated[0].event_date if dated else None
     project.last_event_date = latest.event_date

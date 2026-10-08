@@ -96,18 +96,23 @@ async def _run(summary, sources, client, session_factory, today):
             logger.error(f"Pipeline source {name} failed: {e}")
             summary["sources"][name] = f"failed: {str(e)[:120]}"
             continue
-        async with session_factory() as db:
-            changed = await store_events(db, events)
-            known = kwargs.get("skip_urls") or set()
-            for src, url, d, n in processed:
-                if url in known:   # re-read upcoming agenda: already recorded
-                    continue
-                known.add(url)
-                db.add(PipelineDocument(source=src, url=url[:1000], event_count=n,
-                                        document_date=datetime(d.year, d.month, d.day) if d else None))
-            await db.commit()
-        if processed:
-            summary.setdefault("documents", {})[name] = len(processed)
+        try:
+            async with session_factory() as db:
+                changed = await store_events(db, events)
+                known = kwargs.get("skip_urls") or set()
+                for src, url, d, n in processed:
+                    if url in known:   # re-read upcoming agenda: already recorded
+                        continue
+                    known.add(url)
+                    db.add(PipelineDocument(source=src, url=url[:1000], event_count=n,
+                                            document_date=datetime(d.year, d.month, d.day) if d else None))
+                await db.commit()
+            if processed:
+                summary.setdefault("documents", {})[name] = len(processed)
+        except Exception as e:   # one source's bad data must not stop the others or classification
+            logger.error(f"Pipeline: storing {name} events failed: {str(e)[:300]}")
+            summary["sources"][name] = f"store failed: {str(e)[:120]}"
+            continue
         summary["sources"][name] = len(events)
         summary["events"] += len(events)
         summary["projects_changed"] += len(changed)

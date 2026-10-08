@@ -23,14 +23,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.database import ParcelAnalysis, get_session_factory
 from app.services.parcels import fetch_home_parcel_features, rank_parcels, _js_parse_float
+from app.services.zoning import describe_zoning, lookup_parcel_zoning
 
 logger = logging.getLogger("sitescan.parcel_analysis")
 
 # v1: original schema (total_development_cost excluded land).
 # v2: total_development_cost includes land acquisition; proforma.land_cost added.
-ANALYSIS_VERSION = 2
-MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 2000
+# v3: the model supplies assumptions only (GSF, $/SF, soft %, NOI, cap rate) and
+#     zoning fit; cost, value, profit on cost and the recommendation are computed
+#     here. Prompt includes City zoning, height district and overlays.
+ANALYSIS_VERSION = 3
+DEFAULT_MODEL = "claude-sonnet-5-5"
+MAX_TOKENS = 3000
+# A scenario "pencils" when profit on cost clears this (15%).
+PENCIL_THRESHOLD = 0.15
+ZONING_FITS = ("by_right", "needs_approval", "not_allowed")
 
 JOB_TOP_N = 50
 JOB_CONCURRENCY = 3
@@ -46,37 +53,46 @@ class AnalysisInvalidJSON(AnalysisError):
     """The model's response was not valid JSON."""
 
 
-SYSTEM_PROMPT = """You are a commercial real estate analyst specializing in Charleston, SC development opportunities.
-Given a parcel's data, generate a concise highest-and-best-use analysis with 2-3 development scenarios.
-Always respond with valid JSON matching exactly this structure:
+SYSTEM_PROMPT = """You are a commercial real estate development analyst for Charleston, SC.
+Given a parcel's data and its zoning, propose 2-3 realistic development scenarios and give the
+underwriting ASSUMPTIONS for each. Do not compute totals, value or profit: the application
+calculates the pro forma from your assumptions, so every number must be defensible on its own.
+Respond with valid JSON matching exactly this structure:
 {
   "summary": "1-2 sentence overview of the opportunity",
   "location_context": "Brief description of the neighborhood/submarket",
   "scenarios": [
     {
       "name": "Scenario name",
-      "use_type": "e.g. Boutique Hotel, Mixed-Use Retail/Office, Multifamily Commercial",
+      "use_type": "e.g. Boutique Hotel, Mixed-Use Retail/Office, Multifamily",
       "description": "2-3 sentences on why this use fits and market demand",
-      "proforma": {
-        "land_cost": 0,
-        "estimated_hard_cost": 0,
-        "soft_costs": 0,
-        "total_development_cost": 0,
+      "zoning_fit": "by_right | needs_approval | not_allowed",
+      "zoning_notes": "One sentence: what the zoning allows for this scenario and what approvals it needs",
+      "assumptions": {
+        "gross_sf": 0,
+        "units": 0,
+        "unit_label": "keys | units | null",
+        "hard_cost_psf": 0,
+        "soft_cost_pct": 0.0,
         "stabilized_noi": 0,
-        "cap_rate": 0.0,
-        "projected_value": 0,
-        "profit_margin": "0%"
+        "noi_basis": "One line showing how NOI was derived, e.g. 70 keys x $285 ADR x 78% occ x 365 = $5.7M rooms rev; 32% NOI margin",
+        "cap_rate": 0.0
       }
     }
   ],
-  "recommended_scenario": "Name of the best scenario",
   "next_steps": ["step 1", "step 2", "step 3"]
 }
 Rules:
-- land_cost is the cost to acquire the site. Use the Land Acquisition Basis given in the prompt (the parcel's appraised land value). Only if that basis is $0 or missing, estimate land cost from comparable Charleston land values.
-- total_development_cost MUST include land: total_development_cost = land_cost + estimated_hard_cost + soft_costs.
-- profit_margin = (projected_value - total_development_cost) / total_development_cost, as a percent string like "18%".
-- All dollar values are integers (USD). cap_rate is a float like 7.5. Be realistic for the Charleston market.
+- Respect the zoning given in the prompt: base zoning, height district (stories) and overlays.
+  Size gross_sf to what the lot and height limit can realistically hold. Mark zoning_fit honestly.
+- hard_cost_psf: current construction cost per gross SF for this building type in Charleston,
+  including structured parking if the scenario needs it.
+- soft_cost_pct: soft costs as a decimal fraction of hard cost (e.g. 0.25), covering design, permits,
+  fees, financing, FF&E and pre-opening where applicable (hotels typically need more than other uses).
+- stabilized_noi: annual NOI at stabilization, consistent with noi_basis.
+- cap_rate: market exit cap rate as a percent, e.g. 7.0.
+- Use whole dollars (integers) for gross_sf, units, hard_cost_psf and stabilized_noi.
+- Be realistic, not optimistic: it is fine for a scenario not to pencil.
 Respond with the JSON object only."""
 
 
@@ -85,7 +101,7 @@ def land_basis(parcel: dict) -> int:
     return int(round(_js_parse_float(parcel.get("LAND_APPR")) or _js_parse_float(parcel.get("APPRVAL"))))
 
 
-def build_prompt(parcel: dict) -> str:
+def build_prompt(parcel: dict, zoning: Optional[dict] = None) -> str:
     addr = " ".join(filter(None, [str(parcel.get("HOUSE") or ""), str(parcel.get("STREET") or "")])).strip()
     if not addr:
         addr = "No street address (parcel only)"
@@ -97,26 +113,25 @@ def build_prompt(parcel: dict) -> str:
     owner = parcel.get("OWNER", "Unknown")
     tms = parcel.get("TMS") or parcel.get("PARCELID", "")
     acres = _js_parse_float(parcel.get("GISACRES") or parcel.get("LGLACRES"))
-    acres_line = f"\nLot Size: {acres:.2f} acres" if acres else ""
-    basis_line = (
-        f"${land:,.0f} (appraised land value — use this as land_cost)"
-        if land else "unknown — estimate land_cost from comparable Charleston land values"
-    )
+    acres_line = f"\nLot Size: {acres:.2f} acres ({acres * 43560:,.0f} SF)" if acres else ""
+    city = parcel.get("CITY")
+    city_line = f"\nMunicipality: {city}" if city else ""
 
-    return f"""Analyze this Charleston, SC commercial parcel:
+    return f"""Analyze this Charleston County, SC commercial parcel:
 
 Address: {addr}
-TMS: {tms}
+TMS: {tms}{city_line}
 Current Use: {genuse}
 Owner: {owner}
-Land Value: ${land:,.0f}
+Land Value (assessor): ${land:,.0f}
 Improvements Value: ${imp:,.0f}
 Total Appraised Value: ${total:,.0f}
 Year Built: {yr}{acres_line}
 Improvement Ratio: {round(imp / total * 100) if total else 0}% (lower = more opportunity)
-Land Acquisition Basis: {basis_line}
 
-Generate a highest-and-best-use analysis with 2-3 realistic development scenarios appropriate for this Charleston location. Every scenario's total_development_cost must include land_cost."""
+{describe_zoning(zoning)}
+
+The pro forma will use ${land:,.0f} as the land cost. Give 2-3 scenarios that fit this zoning."""
 
 
 def is_current(analysis: Any) -> bool:
@@ -131,38 +146,85 @@ def _num(v: Any) -> Optional[float]:
         return float(v)
     if isinstance(v, str):
         try:
-            return float(v.replace(",", "").replace("$", "").strip())
+            return float(v.replace(",", "").replace("$", "").replace("%", "").strip())
         except ValueError:
             return None
     return None
 
 
-def normalize_analysis(analysis: dict, basis: int) -> dict:
-    """Stamp version and make sure every proforma carries land in its total cost.
+def build_proforma(assumptions: dict, land: float) -> Optional[dict]:
+    """Deterministic pro forma from the model's assumptions; None if they are unusable."""
+    a = assumptions or {}
+    gsf, psf = _num(a.get("gross_sf")), _num(a.get("hard_cost_psf"))
+    soft_pct, noi, cap = _num(a.get("soft_cost_pct")), _num(a.get("stabilized_noi")), _num(a.get("cap_rate"))
+    if not gsf or not psf or noi is None or not cap or gsf <= 0 or psf <= 0 or cap <= 0:
+        return None
+    if soft_pct is None or soft_pct < 0:
+        soft_pct = 0.0
+    if soft_pct > 1:           # model gave a percent (25) instead of a fraction (0.25)
+        soft_pct /= 100
+    if cap < 1:                # model gave a fraction (0.07) instead of a percent (7.0)
+        cap *= 100
+    hard = gsf * psf
+    soft = hard * soft_pct
+    total = land + hard + soft
+    value = noi / (cap / 100)
+    poc = (value - total) / total if total > 0 else None
+    yoc = noi / total if total > 0 else None
+    return {
+        "land_cost": int(round(land)),
+        "estimated_hard_cost": int(round(hard)),
+        "soft_costs": int(round(soft)),
+        "total_development_cost": int(round(total)),
+        "stabilized_noi": int(round(noi)),
+        "cap_rate": round(cap, 2),
+        "projected_value": int(round(value)),
+        "profit_on_cost": round(poc, 4) if poc is not None else None,
+        "profit_margin": f"{round(poc * 100)}%" if poc is not None else None,
+        "yield_on_cost": round(yoc * 100, 2) if yoc is not None else None,
+        "pencils": poc is not None and poc >= PENCIL_THRESHOLD,
+    }
 
-    - Missing/non-numeric land_cost → the parcel's land basis.
-    - If total_development_cost < land + hard + soft (model left land out),
-      raise it to that sum and recompute profit_margin.
+
+def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None) -> dict:
+    """Compute every scenario's pro forma, pick the recommendation and stamp the version.
+
+    The recommended scenario is the highest profit on cost among scenarios the
+    zoning allows (by right or with approval); if none is allowed, the best overall.
+    `pencils` says whether that recommendation clears PENCIL_THRESHOLD.
     """
-    for scenario in analysis.get("scenarios") or []:
-        pf = scenario.get("proforma") if isinstance(scenario, dict) else None
-        if not isinstance(pf, dict):
+    scenarios = []
+    for s in analysis.get("scenarios") or []:
+        if not isinstance(s, dict):
             continue
-        land = _num(pf.get("land_cost"))
-        if land is None:
-            land = float(basis)
-            pf["land_cost"] = int(basis)
-        hard, soft, total = _num(pf.get("estimated_hard_cost")), _num(pf.get("soft_costs")), _num(pf.get("total_development_cost"))
-        if hard is not None and soft is not None:
-            floor_total = land + hard + soft
-            if total is None or total < floor_total * 0.99:
-                pf["total_development_cost"] = int(round(floor_total))
-                value = _num(pf.get("projected_value"))
-                if value is not None and floor_total > 0:
-                    pf["profit_margin"] = f"{round((value - floor_total) / floor_total * 100)}%"
+        fit = str(s.get("zoning_fit") or "").strip().lower().replace(" ", "_")
+        s["zoning_fit"] = fit if fit in ZONING_FITS else "needs_approval"
+        pf = build_proforma(s.get("assumptions") or {}, float(basis))
+        if pf is None:
+            continue
+        s["proforma"] = pf
+        scenarios.append(s)
+    analysis["scenarios"] = scenarios
+
+    def poc(s):
+        return s["proforma"]["profit_on_cost"] if s["proforma"]["profit_on_cost"] is not None else float("-inf")
+    allowed = [s for s in scenarios if s["zoning_fit"] != "not_allowed"]
+    best = max(allowed or scenarios, key=poc, default=None)
+    analysis["recommended_scenario"] = best["name"] if best else None
+    analysis["pencils"] = bool(best and best["proforma"]["pencils"])
+    analysis["pencil_threshold"] = PENCIL_THRESHOLD
+    analysis["zoning"] = zoning
     analysis["land_basis"] = int(basis)
+    analysis["model"] = analysis.get("model") or model_name()
     analysis["version"] = ANALYSIS_VERSION
     return analysis
+
+
+def model_name() -> str:
+    try:
+        return get_settings().parcel_analysis_model or DEFAULT_MODEL
+    except Exception:
+        return DEFAULT_MODEL
 
 
 def _parse_json(raw: str) -> dict:
@@ -188,20 +250,24 @@ async def generate_analysis(
     tms: str,
     api_key: Optional[str] = None,
     client: Optional[Any] = None,
+    zoning_lookup: Optional[Callable[[dict, str], Awaitable[Optional[dict]]]] = None,
 ) -> dict:
-    """Call Claude for one parcel and return a normalized current-version analysis.
+    """Look up zoning, call Claude for one parcel and return a finalized current-version analysis.
 
     Raises AnalysisInvalidJSON / AnalysisError. Pass `client` to reuse an
-    AsyncAnthropic instance (the nightly job) or to inject a mock in tests.
+    AsyncAnthropic instance (the nightly job) or to inject a mock in tests, and
+    `zoning_lookup` to stub the City zoning service.
     """
+    zoning = await (zoning_lookup or lookup_parcel_zoning)(parcel, tms)
+    model = model_name()
     if client is None:
         client = anthropic.AsyncAnthropic(api_key=api_key or get_settings().anthropic_api_key)
     try:
         message = await client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_prompt(parcel)}],
+            messages=[{"role": "user", "content": build_prompt(parcel, zoning)}],
         )
         raw = message.content[0].text
     except Exception as e:
@@ -212,7 +278,8 @@ async def generate_analysis(
     except json.JSONDecodeError as e:
         logger.error(f"Claude returned invalid JSON for TMS {tms}: {e}")
         raise AnalysisInvalidJSON("AI returned invalid response") from e
-    return normalize_analysis(analysis, land_basis(parcel))
+    analysis["model"] = model
+    return finalize_analysis(analysis, land_basis(parcel), zoning)
 
 
 async def get_analysis_row(db: AsyncSession, tms: str) -> Optional[ParcelAnalysis]:

@@ -44,15 +44,25 @@ async def _make_factory():
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-def _ai_json(land=500_000, hard=2_000_000, soft=300_000, total=None, value=4_000_000, with_land=True):
-    pf = {"estimated_hard_cost": hard, "soft_costs": soft,
-          "total_development_cost": total if total is not None else land + hard + soft,
-          "stabilized_noi": 300_000, "cap_rate": 7.0, "projected_value": value, "profit_margin": "20%"}
-    if with_land:
-        pf["land_cost"] = land
+def _scenario(name="A", gsf=40_000, psf=300, soft=0.25, noi=1_500_000, cap=7.0, fit="by_right"):
+    return {"name": name, "use_type": "Retail", "description": "d", "zoning_fit": fit, "zoning_notes": "z",
+            "assumptions": {"gross_sf": gsf, "units": None, "unit_label": None, "hard_cost_psf": psf,
+                            "soft_cost_pct": soft, "stabilized_noi": noi, "noi_basis": "b", "cap_rate": cap}}
+
+
+def _ai_json(*scenarios):
     return json.dumps({"summary": "s", "location_context": "l",
-                       "scenarios": [{"name": "A", "use_type": "Retail", "description": "d", "proforma": pf}],
-                       "recommended_scenario": "A", "next_steps": ["x"]})
+                       "scenarios": list(scenarios) or [_scenario()], "next_steps": ["x"]})
+
+
+async def _no_zoning(parcel, tms):
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _stub_zoning(monkeypatch):
+    """Never call the City zoning service from tests."""
+    monkeypatch.setattr(pa, "lookup_parcel_zoning", _no_zoning)
 
 
 class FakeClient:
@@ -81,7 +91,8 @@ class FakeClient:
     ({"GENUSE": "Commercial - UNDEVELOPABLE", "LAND_APPR": 100, "IMP_APPR": 0}, 3),
     ({"GENUSE": "Commercial"}, 50),
     ({"LAND_APPR": 0, "IMP_APPR": 0}, 50),
-    ({"LAND_APPR": 100000, "IMP_APPR": 0}, 95),
+    ({"LAND_APPR": 100000, "IMP_APPR": 0}, 100),            # vacant ranks with the best, not below them
+    ({"LAND_APPR": 3631600, "IMP_APPR": 65400}, 98),        # 483 Meeting St
     ({"LAND_APPR": None, "IMP_APPR": 50000}, 15),
     ({"LAND_APPR": 750000, "IMP_APPR": 250000}, 75),
     ({"LAND_APPR": "300000", "IMP_APPR": "100000"}, 75),   # strings parse like parseFloat
@@ -97,13 +108,14 @@ def test_rank_parcels_filters_and_orders():
     feats = [
         {"properties": {"TMS": "low", "LAND_APPR": 100, "IMP_APPR": 900}},           # 10 -> dropped
         {"properties": {"TMS": "mid", "LAND_APPR": 600, "IMP_APPR": 400}},           # 60
-        {"properties": {"TMS": "vac_small", "LAND_APPR": 1000, "IMP_APPR": 0}},      # 95
-        {"properties": {"TMS": "vac_big", "LAND_APPR": 9000, "IMP_APPR": 0}},        # 95
+        {"properties": {"TMS": "vac_small", "LAND_APPR": 1000, "IMP_APPR": 0}},      # 100
+        {"properties": {"TMS": "vac_big", "LAND_APPR": 9000, "IMP_APPR": 0}},        # 100
+        {"properties": {"TMS": "shed", "LAND_APPR": 99999, "IMP_APPR": 1}},          # 100, most land
         {"properties": {"TMS": "unknown", "APPRVAL": 5000}},                         # 50 -> dropped
         {"properties": {"TMS": "edge", "LAND_APPR": 55, "IMP_APPR": 45}},            # 55 -> kept
         {"properties": {"TMS": "undev", "GENUSE": "undevelopable", "LAND_APPR": 1}}, # 3
     ]
-    assert [p["TMS"] for p in rank_parcels(feats)] == ["vac_big", "vac_small", "mid", "edge"]
+    assert [p["TMS"] for p in rank_parcels(feats)] == ["shed", "vac_big", "vac_small", "mid", "edge"]
 
 
 # ─── versioning / normalization ──────────────────────────────────────────────
@@ -115,34 +127,82 @@ def test_is_current():
     assert not pa.is_current(None)
 
 
-def test_normalize_adds_land_and_fixes_total():
-    a = json.loads(_ai_json(hard=2_000_000, soft=300_000, total=2_300_000, value=4_000_000, with_land=False))
-    out = pa.normalize_analysis(a, 700_000)
-    pf = out["scenarios"][0]["proforma"]
-    assert out["version"] == pa.ANALYSIS_VERSION and out["land_basis"] == 700_000
-    assert pf["land_cost"] == 700_000
-    assert pf["total_development_cost"] == 3_000_000
-    assert pf["profit_margin"] == "33%"
+def test_proforma_is_computed_not_trusted():
+    # 483 Meeting St as the AI first described it: 70 keys, $12.0M hard, $1.8M soft, $1.35M NOI at 7.8%.
+    pf = pa.build_proforma({"gross_sf": 48_000, "hard_cost_psf": 250, "soft_cost_pct": 0.15,
+                            "stabilized_noi": 1_350_000, "cap_rate": 7.8}, 3_631_600)
+    assert pf["estimated_hard_cost"] == 12_000_000 and pf["soft_costs"] == 1_800_000
+    assert pf["total_development_cost"] == 17_431_600
+    assert pf["projected_value"] == 17_307_692
+    assert pf["profit_margin"] == "-1%" and pf["pencils"] is False
+    assert pf["yield_on_cost"] == 7.74
 
 
-def test_normalize_keeps_consistent_total():
-    a = json.loads(_ai_json(land=500_000))
-    pf = pa.normalize_analysis(a, 500_000)["scenarios"][0]["proforma"]
-    assert pf["total_development_cost"] == 2_800_000 and pf["profit_margin"] == "20%"
+def test_proforma_unit_slips_and_bad_input():
+    pf = pa.build_proforma({"gross_sf": 10_000, "hard_cost_psf": 200, "soft_cost_pct": 25,
+                            "stabilized_noi": 280_000, "cap_rate": 0.07}, 500_000)
+    assert pf["soft_costs"] == 500_000 and pf["cap_rate"] == 7.0      # 25 -> 0.25, 0.07 -> 7.0
+    assert pf["total_development_cost"] == 3_000_000 and pf["projected_value"] == 4_000_000
+    assert pf["profit_margin"] == "33%" and pf["pencils"] is True
+    assert pa.build_proforma({"gross_sf": 0, "hard_cost_psf": 200, "stabilized_noi": 1, "cap_rate": 7}, 1) is None
+    assert pa.build_proforma({"gross_sf": "abc"}, 1) is None
+
+
+def test_finalize_recommends_best_allowed_scenario():
+    a = json.loads(_ai_json(
+        _scenario("Hotel", noi=3_000_000, fit="not_allowed"),     # best numbers but zoning says no
+        _scenario("Retail", noi=1_500_000),                        # 40k*300*1.25=15M + 1M land = 16M; 21.4M value
+        _scenario("Office", noi=1_200_000, fit="needs_approval"),
+        {"name": "Broken", "assumptions": {}},                     # dropped: unusable assumptions
+    ))
+    out = pa.finalize_analysis(a, 1_000_000, {"base_zoning": "MU-2/WH"})
+    assert [s["name"] for s in out["scenarios"]] == ["Hotel", "Retail", "Office"]
+    assert out["recommended_scenario"] == "Retail"
+    assert out["pencils"] is True and out["zoning"] == {"base_zoning": "MU-2/WH"}
+    assert out["version"] == pa.ANALYSIS_VERSION and out["land_basis"] == 1_000_000
+    assert out["scenarios"][1]["proforma"]["land_cost"] == 1_000_000
+
+
+def test_finalize_flags_when_nothing_pencils():
+    out = pa.finalize_analysis(json.loads(_ai_json(_scenario("Thin", noi=1_000_000))), 1_000_000)
+    assert out["recommended_scenario"] == "Thin" and out["pencils"] is False
+
+
+def test_finalize_unknown_zoning_fit_defaults_to_needs_approval():
+    out = pa.finalize_analysis(json.loads(_ai_json(_scenario(fit="maybe?"))), 1)
+    assert out["scenarios"][0]["zoning_fit"] == "needs_approval"
 
 
 def test_land_basis_and_prompt():
     assert pa.land_basis({"LAND_APPR": 250000, "APPRVAL": 900000}) == 250000
     assert pa.land_basis({"APPRVAL": 900000}) == 900000
-    assert "Land Acquisition Basis: $250,000" in pa.build_prompt({"TMS": "1", "LAND_APPR": 250000})
-    assert "land_cost" in pa.SYSTEM_PROMPT and "MUST include land" in pa.SYSTEM_PROMPT
+    prompt = pa.build_prompt({"TMS": "1", "LAND_APPR": 250000, "GISACRES": 0.43}, {
+        "base_zoning": "MU-2/WH", "height_district": "8", "height_type": "Story",
+        "accommodations_overlay": "A-1", "old_and_historic": True, "area": "Peninsula"})
+    assert "$250,000 as the land cost" in prompt and "18,731 SF" in prompt
+    assert "Base zoning: MU-2/WH" in prompt and "8 stories maximum" in prompt
+    assert "Accommodations Overlay: A-1" in prompt and "Board of Architectural Review" in prompt
+    assert "not available" in pa.build_prompt({"TMS": "1"}, None)
+    assert "Do not compute totals" in pa.SYSTEM_PROMPT and "zoning_fit" in pa.SYSTEM_PROMPT
+
+
+def test_no_accommodations_overlay_rules_out_hotels():
+    from app.services.zoning import describe_zoning
+    assert "not_allowed by right" in describe_zoning({"base_zoning": "GB"})
 
 
 def test_generate_analysis_with_fenced_json():
     client = FakeClient(text="```json\n" + _ai_json() + "\n```")
-    out = run(pa.generate_analysis({"TMS": "t", "LAND_APPR": 500000}, "t", client=client))
-    assert out["version"] == pa.ANALYSIS_VERSION
-    assert client.calls[0]["model"] == pa.MODEL
+    seen = []
+
+    async def zoning(parcel, tms):
+        seen.append(tms)
+        return {"base_zoning": "GB"}
+    out = run(pa.generate_analysis({"TMS": "t", "LAND_APPR": 500000}, "t", client=client, zoning_lookup=zoning))
+    assert out["version"] == pa.ANALYSIS_VERSION and seen == ["t"]
+    assert out["zoning"] == {"base_zoning": "GB"} and out["recommended_scenario"] == "A"
+    assert client.calls[0]["model"] == pa.model_name() == out["model"]
+    assert "Base zoning: GB" in client.calls[0]["messages"][0]["content"]
 
 
 def test_generate_analysis_invalid_json():
@@ -210,7 +270,7 @@ def test_endpoints_regenerate_stale_and_hide_stale_from_cache(monkeypatch):
 
     async def fake_generate(parcel, tms, api_key=None, client=None):
         gen_calls.append(tms)
-        return pa.normalize_analysis(json.loads(_ai_json()), pa.land_basis(parcel))
+        return pa.finalize_analysis(json.loads(_ai_json()), pa.land_basis(parcel))
     monkeypatch.setattr(analyze, "generate_analysis", fake_generate)
 
     async def go():

@@ -53,6 +53,8 @@ class Settings(BaseSettings):
 
     # AI
     anthropic_api_key: str = ""
+    # Model for parcel highest-and-best-use analyses (env PARCEL_ANALYSIS_MODEL).
+    parcel_analysis_model: str = "claude-sonnet-5-5"
 
     model_config = {"env_file": None}
 

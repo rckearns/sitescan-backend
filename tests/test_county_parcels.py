@@ -84,14 +84,14 @@ def test_fetch_raises_on_service_error():
 def test_ranked_home_parcels_scores_dedupes_and_sorts():
     feats = [parcels.county_feature_to_parcel(x) for x in (
         county_feat("a", land=100000, imp=90000),   # score 53 → dropped
-        county_feat("b", land=200000, imp=0),       # 95
-        county_feat("c", land=500000, imp=0),       # 95, more land → first
+        county_feat("b", land=200000, imp=0),       # 100
+        county_feat("c", land=500000, imp=0),       # 100, more land → first
         county_feat("c", land=500000, imp=0),       # duplicate TMS
         county_feat("d", land=100000, imp=20000),   # 83
     )]
     ranked = parcels.ranked_home_parcels(feats)
     assert [f["properties"]["TMS"] for f in ranked] == ["c", "b", "d"]
-    assert ranked[0]["properties"]["SCORE"] == 95
+    assert ranked[0]["properties"]["SCORE"] == 100
 
 
 def test_home_features_are_cached(monkeypatch):

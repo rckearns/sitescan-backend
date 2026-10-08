@@ -156,6 +156,8 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
             "IMP_APPR": imp,
             "APPRVAL": a.get(_C + "APPRAISAL") or (land + imp),
             "GISACRES": a.get(_P + "ACRES_CAL"),
+            "LON": round(center[0], 6),
+            "LAT": round(center[1], 6),
             "SOURCE": "charleston-county",
         },
     }
@@ -339,7 +341,7 @@ def opportunity_score(props: dict) -> int:
     if land == 0 and imp == 0:
         return 50
     if imp == 0:
-        return 95
+        return 100   # vacant: no building at all is the most under-improved a parcel can be
     if land == 0:
         return 15
     imp_ratio = imp / (land + imp)

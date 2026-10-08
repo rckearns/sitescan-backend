@@ -161,11 +161,50 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
     }
 
 
+COUNTY_DIRECT_TIMEOUT = 20.0   # seconds; the county stopped answering Railway's IP at times
+COUNTY_PROXY_TIMEOUT = 90.0
+
+
+def _zenrows_key() -> str:
+    import os
+    key = os.environ.get("ZENROWS_API_KEY", "")
+    if not key:
+        try:
+            from app.config import get_settings
+            key = get_settings().zenrows_api_key or ""
+        except Exception:
+            key = ""
+    return key
+
+
+async def _county_page(client: httpx.AsyncClient, params: dict, state: dict) -> dict:
+    """One page of county results: direct first; if the county doesn't answer
+    (timeout / connection refused), retry through the ZenRows proxy and keep
+    using it for the rest of this fetch."""
+    if not state.get("proxy"):
+        try:
+            resp = await client.get(COUNTY_PARCELS_URL, params=params, timeout=COUNTY_DIRECT_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            key = _zenrows_key()
+            if not key:
+                raise
+            logger.warning(f"County parcel service unreachable directly ({type(exc).__name__}); using proxy")
+            state["proxy"] = key
+    target = str(httpx.URL(COUNTY_PARCELS_URL, params=params))
+    resp = await client.get("https://api.zenrows.com/v1/", params={"apikey": state["proxy"], "url": target},
+                            timeout=COUNTY_PROXY_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = None) -> list[dict]:
     """Every matching county parcel, paged by OBJECTID. Raises httpx.HTTPError on failure."""
     own = client is None
-    client = client or httpx.AsyncClient(timeout=60.0)
+    client = client or httpx.AsyncClient(timeout=COUNTY_DIRECT_TIMEOUT)
     features: list[dict] = []
+    state: dict = {}
     try:
         for page in range(COUNTY_MAX_PAGES):
             params = {
@@ -180,9 +219,7 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
                 "resultRecordCount": str(COUNTY_PAGE_SIZE),
                 "f": "geojson",
             }
-            resp = await client.get(COUNTY_PARCELS_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+            data = await _county_page(client, params, state)
             if "error" in data:
                 raise httpx.HTTPError(f"County parcel service error: {data['error']}")
             batch = data.get("features") or []
@@ -192,6 +229,8 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
     finally:
         if own:
             await client.aclose()
+    if state.get("proxy"):
+        logger.info(f"County parcels fetched through proxy: {len(features)}")
     return features
 
 

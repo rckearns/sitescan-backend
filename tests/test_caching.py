@@ -196,3 +196,30 @@ def test_home_parcels_etag_and_304(monkeypatch):
     assert first.status_code == 200 and first.headers["etag"]
     again = run(router.home_parcels(request=req({"if-none-match": first.headers["etag"]}), user=None))
     assert again.status_code == 304 and again.body == b""
+
+
+def test_county_falls_back_to_proxy_when_direct_times_out(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "gisccapps.charlestoncounty.org":
+            raise httpx.ReadTimeout("no answer", request=request)
+        assert request.url.params["apikey"] == "zr-test"
+        assert "gisccapps.charlestoncounty.org" in request.url.params["url"]
+        return httpx.Response(200, json={"type": "FeatureCollection", "features": [], "exceededTransferLimit": False})
+
+    monkeypatch.setattr(parcels, "_zenrows_key", lambda: "zr-test")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert run(parcels.fetch_county_parcel_features(client)) == []
+    assert seen == ["gisccapps.charlestoncounty.org", "api.zenrows.com"]
+
+
+def test_county_timeout_without_proxy_key_raises(monkeypatch):
+    def handler(request):
+        raise httpx.ReadTimeout("no answer", request=request)
+
+    monkeypatch.setattr(parcels, "_zenrows_key", lambda: "")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.TimeoutException):
+        run(parcels.fetch_county_parcel_features(client))

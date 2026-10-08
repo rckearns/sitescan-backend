@@ -235,7 +235,9 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
     return features
 
 
-HOME_PAYLOAD_KEY = "home-parcels:charleston-county"
+# v2: features carry CONSTRUCTION (recent new-construction permits); bumping the key
+# makes the first request after deploy rebuild the saved copy with those flags.
+HOME_PAYLOAD_KEY = "home-parcels:charleston-county:v2"
 
 
 async def _load_saved_features() -> tuple:
@@ -288,9 +290,20 @@ async def fetch_home_parcel_features() -> list[dict]:
                 _county_cache["features"], _county_cache["at"] = saved, time.monotonic()
                 return saved
             raise
+        await _flag_recent_construction(features)
         await _save_features(features)
         _county_cache["features"], _county_cache["at"] = features, time.monotonic()
         return features
+
+
+async def _flag_recent_construction(features: list) -> None:
+    """Best-effort: mark parcels with recent City new-construction permits."""
+    try:
+        from app.services.construction import annotate_construction, fetch_recent_construction
+        n = annotate_construction(features, await fetch_recent_construction())
+        logger.info(f"Flagged {n} parcels with recent new-construction permits")
+    except Exception as exc:   # permits are an enhancement; never block the parcel list
+        logger.warning(f"Recent-construction check failed: {type(exc).__name__}: {exc}")
 
 
 def ranked_home_parcels(features: list[dict], min_score: int = MIN_OPPORTUNITY_SCORE) -> list[dict]:

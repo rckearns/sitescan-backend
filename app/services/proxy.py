@@ -35,7 +35,13 @@ async def proxied(client: httpx.AsyncClient, method: str, url: str, *, data: Opt
     key = zenrows_key()
     if not key:
         raise httpx.ConnectError(f"No ZenRows key to proxy {url}")
-    resp = await client.request(method, ZENROWS_URL, params=zenrows_params(key, url, premium),
-                                data=data, timeout=timeout)
-    resp.raise_for_status()
+    try:
+        resp = await client.request(method, ZENROWS_URL, params=zenrows_params(key, url, premium),
+                                    data=data, timeout=timeout)
+    except httpx.HTTPError as exc:
+        # Don't let the request URL (which carries the API key) reach logs or responses.
+        raise type(exc)(f"proxy request for {url} failed: {type(exc).__name__}") from None
+    if resp.status_code >= 400:
+        raise httpx.HTTPStatusError(f"proxy returned {resp.status_code} for {url}",
+                                    request=httpx.Request(method, url), response=resp)
     return resp

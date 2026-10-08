@@ -39,6 +39,7 @@ def _project_out(p: PipelineProject, status: str, reasons: list) -> dict:
         "estimate": p.estimate,
         "estimate_basis": p.estimate_basis,
         "in_charleston_area": p.in_charleston_area,
+        "is_building_project": p.is_building_project,
         "summary": p.summary,
         "match": status,
         "match_reasons": reasons,

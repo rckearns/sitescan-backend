@@ -17,7 +17,8 @@ from app.services.parcel_analysis import _parse_json
 
 logger = logging.getLogger("sitescan.pipeline")
 
-CLASSIFY_VERSION = 1
+# v2: evidence required for construction type; is_building_project added.
+CLASSIFY_VERSION = 2
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 900
 MAX_INPUT_CHARS = 14000
@@ -36,8 +37,9 @@ Respond with JSON only, exactly this shape:
   "title": "short project name, e.g. 'College of Charleston Project 205 student housing'",
   "owner": "owner / agency",
   "building_type": one of ["higher-ed","k12","healthcare","government","commercial","hospitality","multifamily","industrial","infrastructure","other"],
+  "is_building_project": true or false,
   "construction_type": one of ["non-wood","wood","unknown"],
-  "construction_reason": "one short sentence",
+  "construction_reason": "the specific evidence from the documents, or 'not stated'",
   "delivery_method": one of ["cmr","design-build","qualifications","design-bid-build","unknown"],
   "delivery_basis": one of ["stated","inferred","unknown"],
   "estimated_construction_value": number in USD or null,
@@ -47,12 +49,23 @@ Respond with JSON only, exactly this shape:
 }
 
 Rules:
-- construction_type: "wood" only when wood framing is stated or the project is clearly low-rise
-  light construction (single-family, townhomes, garden apartments, small wood-frame buildings).
-  "non-wood" when steel/concrete/masonry is stated or the type virtually never uses wood framing
-  (labs, hospitals, classroom/academic buildings, parking decks, buildings over 5 stories,
-  most state institutional buildings). Mid-rise student or multifamily housing without stated
-  structure -> "unknown". Never guess wood from cost alone.
+- is_building_project: true only for vertical building work a general contractor would build:
+  a new building, an addition, or a major renovation of a building. false for site/civil work
+  (ponds, drainage, paving, roads, bridges, utilities, dredging, marine work), professional
+  services (engineering, CE&I, inspection, design-only), maintenance or single-trade repairs,
+  equipment purchases, and land purchases. A rezoning/PUD/concept review counts as true only if it
+  is clearly for new buildings.
+- construction_type MUST be backed by evidence in the documents, quoted or closely paraphrased in
+  construction_reason (e.g. "8-story", "parking deck", "steel frame", "laboratory building",
+  "4-story wood-frame apartments"). If the documents don't say anything about structure, height,
+  or a building type that is never wood-framed, answer "unknown" with reason "not stated".
+  - "wood": wood framing stated, or clearly low-rise light construction (single-family,
+    townhomes, garden apartments, small wood-frame buildings).
+  - "non-wood": steel/concrete/masonry stated, more than 5 stories stated, or a building type that
+    is essentially never wood-framed (laboratory, hospital, parking deck, classroom/academic
+    building, data center).
+  - Student or multifamily housing without stated height or structure -> "unknown".
+  - Never infer construction type from cost, owner, or a project's purpose alone.
 - delivery_method: "stated" only if a document names it (Construction Manager at Risk / CM-R,
   design-build, design-bid-build / sealed bid / IFB). An A/E ad's "Anticipated Project Delivery
   Method" counts as stated. Otherwise infer only with good reason, else "unknown".
@@ -98,6 +111,11 @@ def apply_classification(project: PipelineProject, data: dict) -> None:
     project.building_type = _choice(data.get("building_type"), BUILDING_TYPES, "other")
     project.construction_type = _choice(data.get("construction_type"), CONSTRUCTION, "unknown")
     project.construction_reason = str(data.get("construction_reason") or "")[:500]
+    # A type claim with no evidence behind it is treated as unknown.
+    if project.construction_type != "unknown" and project.construction_reason.strip().lower() in ("", "not stated", "n/a", "unknown"):
+        project.construction_type = "unknown"
+    is_building = data.get("is_building_project")
+    project.is_building_project = is_building if isinstance(is_building, bool) else None
     if project.delivery_basis != "stated":
         method = _choice(data.get("delivery_method"), DELIVERY, "unknown")
         basis = _choice(data.get("delivery_basis"), ("stated", "inferred", "unknown"), "unknown")

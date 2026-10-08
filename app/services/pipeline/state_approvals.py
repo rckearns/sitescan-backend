@@ -35,6 +35,8 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
+from app.services.proxy import proxied
+
 from app.services.pipeline.events import PipelineEvent, normalize_pip, pip_project_key
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ SFAA_INDEX_URL = "https://sfaa.sc.gov/authority-meetings"
 
 USER_AGENT = "Yabodle/1.0 (sitescan pipeline; contact@yabodle.com)"
 REQUEST_DELAY_SECONDS = 2.0       # pause between document downloads
+DIRECT_TIMEOUT = 20.0  # seconds before falling back to the proxy
 MAX_PDF_BYTES = 80 * 1024 * 1024  # JBRC packages run 6–38 MB
 TEXT_LIMIT = 6000
 
@@ -185,10 +188,15 @@ async def discover_sfaa_documents(client: httpx.AsyncClient, years: Iterable[int
     seen = set()
     for year in sorted(set(years), reverse=True):
         try:
-            resp = await client.post(
-                SFAA_INDEX_URL, data={"mtgsel": str(year)}, headers={"User-Agent": USER_AGENT}
-            )
-            resp.raise_for_status()
+            try:
+                resp = await client.post(
+                    SFAA_INDEX_URL, data={"mtgsel": str(year)}, headers={"User-Agent": USER_AGENT},
+                    timeout=DIRECT_TIMEOUT,
+                )
+                resp.raise_for_status()
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # sfaa.sc.gov doesn't answer Railway's IP; go through the proxy.
+                resp = await proxied(client, "POST", SFAA_INDEX_URL, data={"mtgsel": str(year)})
         except httpx.HTTPError as exc:
             logger.warning("sfaa: meetings page for %s failed: %s", year, exc)
             continue
@@ -597,7 +605,19 @@ def parse_document(pdf_bytes: bytes, url: str, meeting_date: date, source: str) 
 # ---------------------------------------------------------------------------
 
 async def _download(client: httpx.AsyncClient, url: str) -> bytes:
-    async with client.stream("GET", url, headers={"User-Agent": USER_AGENT}) as resp:
+    try:
+        return await _download_direct(client, url)
+    except (httpx.TimeoutException, httpx.ConnectError):
+        logger.info("%s unreachable directly; downloading through proxy", url)
+        resp = await proxied(client, "GET", url, timeout=180.0)
+        if len(resp.content) > MAX_PDF_BYTES:
+            raise ValueError(f"{url} exceeds {MAX_PDF_BYTES} bytes")
+        return resp.content
+
+
+async def _download_direct(client: httpx.AsyncClient, url: str) -> bytes:
+    async with client.stream("GET", url, headers={"User-Agent": USER_AGENT},
+                             timeout=httpx.Timeout(DIRECT_TIMEOUT, read=120.0)) as resp:
         resp.raise_for_status()
         chunks = []
         size = 0

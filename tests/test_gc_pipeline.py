@@ -426,3 +426,17 @@ def test_job_continues_when_one_source_fails_to_store(monkeypatch):
     summary, n = run(go())
     assert summary["sources"]["board"].startswith("store failed")
     assert summary["sources"]["jbrc"] == 4 and n == 1 and summary["classified"] == 1
+
+
+def test_construction_claim_without_evidence_becomes_unknown():
+    p = PipelineProject(project_key="PIP:H15.9689", pip_number="H15.9689", delivery_basis="stated", estimate_basis="stated")
+    apply_classification(p, {**AI, "construction_type": "non-wood", "construction_reason": "not stated", "is_building_project": True})
+    assert p.construction_type == "unknown" and p.is_building_project is True
+    apply_classification(p, {**AI, "construction_type": "non-wood", "construction_reason": "8-story concrete", "is_building_project": True})
+    assert p.construction_type == "non-wood"
+
+
+def test_non_building_work_is_excluded():
+    assert M(is_building_project=False)[0] == "excluded"
+    assert M(building_type="infrastructure")[0] == "excluded"
+    assert M(is_building_project=None) == ("match", [])

@@ -317,6 +317,7 @@ class PipelineProject(Base):
     estimate = Column(Float, nullable=True)
     estimate_basis = Column(String(20), default="unknown")  # stated / inferred / unknown
     in_charleston_area = Column(Boolean, nullable=True)
+    is_building_project = Column(Boolean, nullable=True)   # vertical building work (vs civil/services/repairs)
     summary = Column(Text, default="")
 
     ai_version = Column(Integer, default=0)
@@ -587,6 +588,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_min_value FLOAT DEFAULT 1000000",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_project_types JSON DEFAULT '[]'",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_show_unconfirmed BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE pipeline_projects ADD COLUMN IF NOT EXISTS is_building_project BOOLEAN",
             # parcel_analyses — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS parcel_analyses (
                 id SERIAL PRIMARY KEY,

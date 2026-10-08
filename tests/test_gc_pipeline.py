@@ -377,3 +377,52 @@ def test_land_only_projects_are_excluded():
     land_only = SimpleNamespace(events=[SimpleNamespace(stage="land")], delivery_method="", construction_type="unknown",
                                 estimate=75_000_000, building_type="higher-ed", in_charleston_area=True)
     assert match_for_user(land_only, user)[0] == "excluded"
+
+
+def test_rollup_trims_fields_to_column_sizes():
+    # Postgres rejects over-long VARCHARs (SQLite doesn't), which crashed production runs.
+    long_city = "Charleston County Department of Something Very Long " * 5
+    ev = PipelineEvent(source="scbo-construction", external_id="long", project_key="SCBO:long",
+                       title="T" * 900, location=long_city, owner="O" * 400, address="A" * 900,
+                       event_date=date(2026, 9, 1), stage="bid")
+
+    async def go():
+        f = await _factory()
+        async with f() as db:
+            await store_events(db, [ev])
+            await db.commit()
+            return (await db.execute(select(PipelineProject))).scalars().one()
+    p = run(go())
+    assert len(p.city) <= 120 and len(p.owner) <= 255 and len(p.address) <= 500 and len(p.title) <= 500
+
+
+def test_job_continues_when_one_source_fails_to_store(monkeypatch):
+    calls = {"n": 0}
+    real_store = pjob.store_events
+
+    async def flaky_store(db, events):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("value too long for type character varying(120)")
+        return await real_store(db, events)
+
+    async def src_a(since):
+        return [board_event()]
+
+    async def src_b(since):
+        return p205_events()
+
+    monkeypatch.setattr(pjob, "store_events", flaky_store)
+    client = FakeClient(AI)
+
+    async def go():
+        f = await _factory()
+        summary = await pjob.run_pipeline_job(
+            sources=[("board", src_a, None, 1, 1), ("jbrc", src_b, None, 1, 1)],
+            client=client, session_factory=f, today=date(2026, 10, 8))
+        async with f() as db:
+            n = len((await db.execute(select(PipelineProject))).scalars().all())
+        return summary, n
+    summary, n = run(go())
+    assert summary["sources"]["board"].startswith("store failed")
+    assert summary["sources"]["jbrc"] == 4 and n == 1 and summary["classified"] == 1

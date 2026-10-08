@@ -19,7 +19,9 @@ from app.services.ai_text import response_text
 logger = logging.getLogger("sitescan.pipeline")
 
 # v2: evidence required for construction type; is_building_project added.
-CLASSIFY_VERSION = 2
+# v3: a building type the documents name (academic building, hospital, lab,
+#     medical office, parking garage) counts as evidence for non-wood.
+CLASSIFY_VERSION = 3
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 900
 MAX_INPUT_CHARS = 14000
@@ -62,9 +64,12 @@ Rules:
   or a building type that is never wood-framed, answer "unknown" with reason "not stated".
   - "wood": wood framing stated, or clearly low-rise light construction (single-family,
     townhomes, garden apartments, small wood-frame buildings).
-  - "non-wood": steel/concrete/masonry stated, more than 5 stories stated, or a building type that
-    is essentially never wood-framed (laboratory, hospital, parking deck, classroom/academic
-    building, data center).
+  - "non-wood": steel/concrete/masonry stated, more than 5 stories stated, or the documents
+    describe a building type that is essentially never wood-framed: a hospital or cancer center,
+    medical office or clinic building, laboratory or research building, classroom/academic/school
+    building (e.g. "School of Business building", "Engineering building"), parking garage/deck,
+    data center, or a central energy/utility plant. Quote that description as the evidence, e.g.
+    "documents describe an 80,000 SF School of Business building".
   - Student or multifamily housing without stated height or structure -> "unknown".
   - Never infer construction type from cost, owner, or a project's purpose alone.
 - delivery_method: "stated" only if a document names it (Construction Manager at Risk / CM-R,

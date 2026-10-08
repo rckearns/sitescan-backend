@@ -20,8 +20,10 @@ def zenrows_key() -> str:
     return key
 
 
-def zenrows_params(key: str, url: str, premium: bool = False) -> dict:
+def zenrows_params(key: str, url: str, premium: bool = False, js_render: bool = False) -> dict:
     params = {"apikey": key, "url": url}
+    if js_render:
+        params["js_render"] = "true"   # headless browser; for sites that block plain fetches
     if premium:
         # Residential US exit IPs; needed for sites that refuse ZenRows' standard
         # datacenter proxies (SCBO answers those with 422 "could not get content").

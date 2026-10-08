@@ -440,3 +440,21 @@ def test_non_building_work_is_excluded():
     assert M(is_building_project=False)[0] == "excluded"
     assert M(building_type="infrastructure")[0] == "excluded"
     assert M(is_building_project=None) == ("match", [])
+
+
+def test_state_source_backfills_until_sfaa_has_events():
+    seen = []
+
+    async def state_src(since):
+        seen.append(since)
+        return [PipelineEvent(source="jbrc", external_id=f"j{len(seen)}", project_key="PIP:H15.9001",
+                              pip_number="H15.9001", title="X", event_date=date(2026, 6, 3), stage="phase1")]
+
+    async def go():
+        f = await _factory()
+        src = [("jbrc", state_src, None, 830, 60)]
+        await pjob.run_pipeline_job(sources=src, client=FakeClient(AI), session_factory=f, today=date(2026, 10, 8))
+        await pjob.run_pipeline_job(sources=src, client=FakeClient(AI), session_factory=f, today=date(2026, 10, 8))
+    run(go())
+    # JBRC events exist but no SFAA events yet -> both runs use the long lookback
+    assert seen == [date(2026, 10, 8) - pjob.timedelta(days=830)] * 2

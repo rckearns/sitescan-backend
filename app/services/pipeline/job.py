@@ -85,7 +85,11 @@ async def _run(summary, sources, client, session_factory, today):
         if fetch is None:
             summary["sources"][name] = "unavailable"
             continue
-        days = regular_days if await _has_events(session_factory, name) else first_days
+        # The state source covers JBRC and SFAA; backfill until both have events
+        # (SFAA was unreachable from Railway on the first runs).
+        event_sources = ("jbrc", "sfaa") if name == "jbrc" else (name,)
+        has_all = all([await _has_events(session_factory, s) for s in event_sources])
+        days = regular_days if has_all else first_days
         processed = []
         if name in DOCUMENT_SOURCES and "on_document" in inspect.signature(fetch).parameters:
             kwargs = {**kwargs, "skip_urls": await _known_document_urls(session_factory),

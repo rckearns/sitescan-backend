@@ -390,7 +390,9 @@ async def _run_job_body(summary, top_n, concurrency, fetch_features, client, ses
     logger.info("=== Parcel estimates job starting ===")
     features = await fetch_features()
     summary["fetched"] = len(features)
-    ranked = rank_parcels(features)
+    # Parcels with a recent new-construction permit aren't opportunities (the
+    # assessor just hasn't caught up); don't spend AI calls on them.
+    ranked = [p for p in rank_parcels(features) if not p.get("CONSTRUCTION")]
     summary["ranked"] = len(ranked)
     # Same as the frontend: take the top N, then drop rows without a TMS.
     top = [p for p in ranked[:top_n] if p.get("TMS")]

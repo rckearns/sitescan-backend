@@ -486,27 +486,26 @@ async def _fetch_scbo_html(url: str) -> str:
         zenrows_key = get_settings().zenrows_api_key
     if zenrows_key:
         logger.info(f"SCBO fetch via ZenRows: {url}")
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                from app.services.proxy import ZENROWS_URL, zenrows_params
-                resp = await client.get(ZENROWS_URL, params=zenrows_params(zenrows_key, url, premium=True))
-                resp.raise_for_status()
+        from app.services.proxy import ZENROWS_URL, zenrows_params
+        # Premium residential proxies first; SCBO has answered those with 422
+        # ("could not get content"), so retry once with a headless browser.
+        for js_render in (False, True):
+            mode = "premium+js" if js_render else "premium"
+            try:
+                async with httpx.AsyncClient(timeout=120.0 if js_render else 60.0) as client:
+                    resp = await client.get(ZENROWS_URL, params=zenrows_params(
+                        zenrows_key, url, premium=True, js_render=js_render))
+                if resp.status_code >= 400:
+                    # ZenRows' error body names the cause (e.g. RESP001); it never contains the key.
+                    logger.warning(f"ZenRows ({mode}) returned {resp.status_code} for {url}: {resp.text[:200]!r}")
+                    continue
                 # SCBO pages are 400KB+. A block/CAPTCHA page is typically <50KB.
-                # If ZenRows returns suspiciously small content, fall through to
-                # curl_cffi/direct so we don't silently accept a block page.
                 if len(resp.text) >= 50_000:
                     return resp.text
-                logger.warning(
-                    f"ZenRows returned only {len(resp.text)} bytes for {url} "
-                    f"(likely block page) — falling back to curl_cffi/direct"
-                )
-        except httpx.HTTPStatusError as e:
-            logger.warning(
-                f"ZenRows returned {e.response.status_code} for {url} — "
-                f"falling back to curl_cffi/direct"
-            )
-        except Exception as e:
-            logger.warning(f"ZenRows request failed ({e}) — falling back to curl_cffi/direct")
+                logger.warning(f"ZenRows ({mode}) returned only {len(resp.text)} bytes for {url} (likely block page)")
+            except Exception as e:
+                logger.warning(f"ZenRows ({mode}) request failed for {url}: {type(e).__name__}")
+        logger.warning(f"ZenRows could not fetch {url} — falling back to curl_cffi/direct")
     if _CURL_CFFI_AVAILABLE:
         async with CurlSession(impersonate="chrome120") as client:
             resp = await client.get(url, timeout=30)

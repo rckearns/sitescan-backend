@@ -16,6 +16,9 @@ import time
 from typing import Any, Optional
 
 import httpx
+import logging
+
+logger = logging.getLogger("sitescan.parcels")
 
 ARCGIS_PARCELS_URL = (
     "https://gis.charleston-sc.gov/arcgis2/rest/services/"
@@ -158,11 +161,50 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
     }
 
 
+COUNTY_DIRECT_TIMEOUT = 20.0   # seconds; the county stopped answering Railway's IP at times
+COUNTY_PROXY_TIMEOUT = 90.0
+
+
+def _zenrows_key() -> str:
+    import os
+    key = os.environ.get("ZENROWS_API_KEY", "")
+    if not key:
+        try:
+            from app.config import get_settings
+            key = get_settings().zenrows_api_key or ""
+        except Exception:
+            key = ""
+    return key
+
+
+async def _county_page(client: httpx.AsyncClient, params: dict, state: dict) -> dict:
+    """One page of county results: direct first; if the county doesn't answer
+    (timeout / connection refused), retry through the ZenRows proxy and keep
+    using it for the rest of this fetch."""
+    if not state.get("proxy"):
+        try:
+            resp = await client.get(COUNTY_PARCELS_URL, params=params, timeout=COUNTY_DIRECT_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            key = _zenrows_key()
+            if not key:
+                raise
+            logger.warning(f"County parcel service unreachable directly ({type(exc).__name__}); using proxy")
+            state["proxy"] = key
+    target = str(httpx.URL(COUNTY_PARCELS_URL, params=params))
+    resp = await client.get("https://api.zenrows.com/v1/", params={"apikey": state["proxy"], "url": target},
+                            timeout=COUNTY_PROXY_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = None) -> list[dict]:
     """Every matching county parcel, paged by OBJECTID. Raises httpx.HTTPError on failure."""
     own = client is None
-    client = client or httpx.AsyncClient(timeout=60.0)
+    client = client or httpx.AsyncClient(timeout=COUNTY_DIRECT_TIMEOUT)
     features: list[dict] = []
+    state: dict = {}
     try:
         for page in range(COUNTY_MAX_PAGES):
             params = {
@@ -177,9 +219,7 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
                 "resultRecordCount": str(COUNTY_PAGE_SIZE),
                 "f": "geojson",
             }
-            resp = await client.get(COUNTY_PARCELS_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+            data = await _county_page(client, params, state)
             if "error" in data:
                 raise httpx.HTTPError(f"County parcel service error: {data['error']}")
             batch = data.get("features") or []
@@ -189,17 +229,67 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
     finally:
         if own:
             await client.aclose()
+    if state.get("proxy"):
+        logger.info(f"County parcels fetched through proxy: {len(features)}")
     return features
 
 
+HOME_PAYLOAD_KEY = "home-parcels:charleston-county"
+
+
+async def _load_saved_features() -> tuple:
+    """(features, age_seconds) from the database copy, or (None, None)."""
+    try:
+        from datetime import datetime
+        from sqlalchemy import select
+        from app.models.database import CachedPayload, get_session_factory
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(CachedPayload).where(CachedPayload.key == HOME_PAYLOAD_KEY))).scalars().first()
+        if row and isinstance(row.payload, list):
+            return row.payload, (datetime.utcnow() - row.fetched_at).total_seconds()
+    except Exception as exc:
+        logger.debug(f"Saved parcel list unavailable: {exc}")
+    return None, None
+
+
+async def _save_features(features: list) -> None:
+    try:
+        from datetime import datetime
+        from sqlalchemy import select
+        from app.models.database import CachedPayload, get_session_factory
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(CachedPayload).where(CachedPayload.key == HOME_PAYLOAD_KEY))).scalars().first()
+            if row:
+                row.payload, row.fetched_at = features, datetime.utcnow()
+            else:
+                db.add(CachedPayload(key=HOME_PAYLOAD_KEY, payload=features))
+            await db.commit()
+    except Exception as exc:
+        logger.warning(f"Could not save parcel list: {exc}")
+
+
 async def fetch_home_parcel_features() -> list[dict]:
-    """County opportunity parcels, cached in memory for a few hours."""
+    """County opportunity parcels: memory, then the saved database copy (survives
+    restarts/deploys), then the county service. Refreshed every few hours; if the
+    county is down, the last saved copy is served."""
     async with _county_lock:
-        fresh = time.monotonic() - _county_cache["at"] < COUNTY_CACHE_SECONDS
-        if _county_cache["features"] is None or not fresh:
-            _county_cache["features"] = await fetch_county_parcel_features()
-            _county_cache["at"] = time.monotonic()
-        return _county_cache["features"]
+        if _county_cache["features"] is not None and time.monotonic() - _county_cache["at"] < COUNTY_CACHE_SECONDS:
+            return _county_cache["features"]
+        saved, age = await _load_saved_features()
+        if saved is not None and age < COUNTY_CACHE_SECONDS:
+            _county_cache["features"], _county_cache["at"] = saved, time.monotonic() - age
+            return saved
+        try:
+            features = await fetch_county_parcel_features()
+        except httpx.HTTPError:
+            if saved is not None:
+                logger.warning("County parcel service failed; serving the saved copy")
+                _county_cache["features"], _county_cache["at"] = saved, time.monotonic()
+                return saved
+            raise
+        await _save_features(features)
+        _county_cache["features"], _county_cache["at"] = features, time.monotonic()
+        return features
 
 
 def ranked_home_parcels(features: list[dict], min_score: int = MIN_OPPORTUNITY_SCORE) -> list[dict]:

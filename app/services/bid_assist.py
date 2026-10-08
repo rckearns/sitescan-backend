@@ -1,5 +1,6 @@
 """Bid Assist — uses Claude to analyze an RFQ and generate a tailored bid narrative."""
 
+import hashlib
 import logging
 
 from app.config import get_settings
@@ -58,33 +59,21 @@ def _build_org_context(org) -> str:
     return "\n".join(lines)
 
 
-def generate_bid_narrative(org, rfq_text: str) -> str:
-    """Call Claude to generate a bid narrative for the given RFQ.
+BID_MODEL = "claude-sonnet-4-6"
+BID_MAX_TOKENS = 1500
 
-    Returns the narrative as a plain string.
-    Raises RuntimeError if anthropic is not installed or API key is missing.
-    """
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("anthropic package not installed — add it to requirements.txt")
+SYSTEM_PROMPT = (
+    "You are an expert construction bid writer specializing in government and commercial "
+    "contracts in South Carolina. Write professional, compelling bid narratives that "
+    "highlight a contractor's relevant experience and qualifications. Be specific — "
+    "reference actual project names, values, and personnel from the company profile. "
+    "Use clear section headers. Keep it concise (500-800 words) unless more is needed."
+)
 
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured in environment variables")
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+def build_user_prompt(org, rfq_text: str) -> str:
     org_context = _build_org_context(org)
-
-    system_prompt = (
-        "You are an expert construction bid writer specializing in government and commercial "
-        "contracts in South Carolina. Write professional, compelling bid narratives that "
-        "highlight a contractor's relevant experience and qualifications. Be specific — "
-        "reference actual project names, values, and personnel from the company profile. "
-        "Use clear section headers. Keep it concise (500-800 words) unless more is needed."
-    )
-
-    user_prompt = (
+    return (
         f"Using the company profile below, write a bid narrative / qualifications statement "
         f"for the following RFQ.\n\n"
         f"COMPANY PROFILE:\n{org_context}\n\n"
@@ -98,12 +87,30 @@ def generate_bid_narrative(org, rfq_text: str) -> str:
         f"Format with clear section headers."
     )
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        system=system_prompt,
+
+def narrative_cache_key(user_prompt: str) -> str:
+    """Same model + prompt (company profile + RFQ text) -> same saved narrative.
+    Any profile edit changes the prompt, so it produces a fresh narrative."""
+    return hashlib.sha256(f"{BID_MODEL}\n{SYSTEM_PROMPT}\n{user_prompt}".encode()).hexdigest()
+
+
+async def generate_bid_narrative(user_prompt: str, client=None) -> str:
+    """Call Claude for a bid narrative. Uses the async client so a 10-30 s
+    generation doesn't block the web server for everyone else.
+
+    Raises RuntimeError if the API key is missing.
+    """
+    import anthropic
+
+    settings = get_settings()
+    if client is None:
+        if not settings.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured in environment variables")
+        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    message = await client.messages.create(
+        model=BID_MODEL,
+        max_tokens=BID_MAX_TOKENS,
+        system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
-
-    logger.info(f"Bid narrative generated for org {org.id} ({org.legal_name})")
     return message.content[0].text

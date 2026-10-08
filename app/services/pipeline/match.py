@@ -27,6 +27,7 @@ def match_project(
     estimate: Optional[float],
     building_type: str,
     in_charleston_area: Optional[bool],
+    is_building_project: Optional[bool] = None,
     delivery_methods: Optional[list] = None,
     exclude_wood_frame: bool = True,
     min_value: Optional[float] = 1_000_000,
@@ -37,6 +38,8 @@ def match_project(
 
     if in_charleston_area is False:
         excluded.append("Outside the Charleston area")
+    if is_building_project is False or building_type == "infrastructure":
+        excluded.append("Not a building project (site/civil work, services or repairs)")
 
     if not delivery_method:
         unknown.append("Delivery method not stated yet")
@@ -78,6 +81,7 @@ def match_for_user(project, user) -> tuple:
         estimate=project.estimate,
         building_type=project.building_type or "",
         in_charleston_area=project.in_charleston_area,
+        is_building_project=getattr(project, "is_building_project", None),
         delivery_methods=user.gc_delivery_methods if user.gc_delivery_methods is not None else None,
         exclude_wood_frame=True if user.gc_exclude_wood_frame is None else user.gc_exclude_wood_frame,
         min_value=1_000_000 if user.gc_min_value is None else user.gc_min_value,

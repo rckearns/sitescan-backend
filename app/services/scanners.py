@@ -488,10 +488,8 @@ async def _fetch_scbo_html(url: str) -> str:
         logger.info(f"SCBO fetch via ZenRows: {url}")
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.get(
-                    "https://api.zenrows.com/v1/",
-                    params={"apikey": zenrows_key, "url": url},
-                )
+                from app.services.proxy import ZENROWS_URL, zenrows_params
+                resp = await client.get(ZENROWS_URL, params=zenrows_params(zenrows_key, url, premium=True))
                 resp.raise_for_status()
                 # SCBO pages are 400KB+. A block/CAPTCHA page is typically <50KB.
                 # If ZenRows returns suspiciously small content, fall through to

@@ -36,6 +36,10 @@ logging.basicConfig(
 # SQLAlchemy emits one log line per query at INFO level — with 500+ EnerGov
 # calls per scan this floods Railway's 500 log/sec limit and drops app logs.
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+# httpx/httpcore log every request URL at INFO, and ZenRows (and SAM.gov) take
+# their API key as a query parameter, so request logging would leak keys.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 logger = logging.getLogger("sitescan")
 

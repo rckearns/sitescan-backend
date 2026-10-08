@@ -209,7 +209,7 @@ def test_county_falls_back_to_proxy_when_direct_times_out(monkeypatch):
         assert "gisccapps.charlestoncounty.org" in request.url.params["url"]
         return httpx.Response(200, json={"type": "FeatureCollection", "features": [], "exceededTransferLimit": False})
 
-    monkeypatch.setattr(parcels, "_zenrows_key", lambda: "zr-test")
+    monkeypatch.setattr(parcels, "_zenrows_key", lambda: "zr-test"); monkeypatch.setattr("app.services.proxy.zenrows_key", lambda: "zr-test")
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     assert run(parcels.fetch_county_parcel_features(client)) == []
     assert seen == ["gisccapps.charlestoncounty.org", "api.zenrows.com"]

@@ -192,10 +192,9 @@ async def _county_page(client: httpx.AsyncClient, params: dict, state: dict) -> 
                 raise
             logger.warning(f"County parcel service unreachable directly ({type(exc).__name__}); using proxy")
             state["proxy"] = key
+    from app.services.proxy import proxied
     target = str(httpx.URL(COUNTY_PARCELS_URL, params=params))
-    resp = await client.get("https://api.zenrows.com/v1/", params={"apikey": state["proxy"], "url": target},
-                            timeout=COUNTY_PROXY_TIMEOUT)
-    resp.raise_for_status()
+    resp = await proxied(client, "GET", target, timeout=COUNTY_PROXY_TIMEOUT)
     return resp.json()
 
 

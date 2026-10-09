@@ -5,6 +5,7 @@ Starts the API server and background scan scheduler.
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
@@ -206,7 +207,21 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
+    # The route map isn't public; set ENABLE_API_DOCS=1 to turn /docs back on.
+    docs_url="/docs" if os.environ.get("ENABLE_API_DOCS") == "1" else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if os.environ.get("ENABLE_API_DOCS") == "1" else None,
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
 
 # CORS — restrict to known frontend origins
 _ALLOWED_ORIGINS = [
@@ -235,7 +250,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {type(exc).__name__}: {str(exc)[:300]}"},
+        content={"detail": "Internal server error"},   # details stay in the logs
         headers={"Access-Control-Allow-Origin": "*"},
     )
 

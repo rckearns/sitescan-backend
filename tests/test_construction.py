@@ -40,3 +40,13 @@ def test_annotate():
     n = construction.annotate_construction(feats, {"4590601012": {"status": "underway"}})
     assert n == 1 and feats[0]["properties"]["CONSTRUCTION"]["status"] == "underway"
     assert "CONSTRUCTION" not in feats[1]["properties"]
+
+
+def test_mockups_fitouts_and_stale_permits_dont_count():
+    from app.services.construction import _counts
+    year = 2026
+    assert not _counts({"DESCRIPTION": "MOCK UP PANEL for facade", "PERMIT_STATUS": "Issued", "ISSUE_DATE": "01/05/2026"}, year)
+    assert not _counts({"DESCRIPTION": "First generation tenant upfit", "PERMIT_STATUS": "Completed"}, year)
+    assert not _counts({"DESCRIPTION": "New 7-story building", "PERMIT_STATUS": "Issued", "ISSUE_DATE": "03/01/2021"}, year)
+    assert _counts({"DESCRIPTION": "New 7-story building", "PERMIT_STATUS": "Issued", "ISSUE_DATE": "03/01/2024"}, year)
+    assert _counts({"DESCRIPTION": "50 key hotel", "PERMIT_STATUS": "Completed", "ISSUE_DATE": "03/01/2021"}, year)

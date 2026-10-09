@@ -38,6 +38,7 @@ DEFAULT_MODEL = "claude-sonnet-5-5"
 # Thinking (on by default for Sonnet 5.5) counts toward max_tokens; leave room for it
 # plus the JSON answer. 16k is the recommended ceiling for non-streaming requests.
 MAX_TOKENS = 16000
+ATTEMPTS = 2
 # A scenario "pencils" when profit on cost clears this (15%).
 PENCIL_THRESHOLD = 0.15
 ZONING_FITS = ("by_right", "needs_approval", "not_allowed")
@@ -202,7 +203,8 @@ def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None)
             continue
         fit = str(s.get("zoning_fit") or "").strip().lower().replace(" ", "_")
         s["zoning_fit"] = fit if fit in ZONING_FITS else "needs_approval"
-        pf = build_proforma(s.get("assumptions") or {}, float(basis))
+        assumptions = s.get("assumptions")
+        pf = build_proforma(assumptions if isinstance(assumptions, dict) else {}, float(basis))
         if pf is None:
             continue
         s["proforma"] = pf
@@ -265,22 +267,31 @@ async def generate_analysis(
     model = model_name()
     if client is None:
         client = anthropic.AsyncAnthropic(api_key=api_key or get_settings().anthropic_api_key)
-    try:
-        message = await client.messages.create(
-            model=model,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_prompt(parcel, zoning)}],
-        )
-        raw = response_text(message)
-    except Exception as e:
-        logger.error(f"Claude API error for TMS {tms}: {e}")
-        raise AnalysisError(f"AI analysis failed: {str(e)[:200]}") from e
-    try:
-        analysis = _parse_json(raw)
-    except json.JSONDecodeError as e:
-        logger.error(f"Claude returned invalid JSON for TMS {tms}: {e}")
-        raise AnalysisInvalidJSON("AI returned invalid response") from e
+    prompt = build_prompt(parcel, zoning)
+    # One retry: overloads and the odd malformed or cut-off answer usually clear on a second try.
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            message = await client.messages.create(
+                model=model,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response_text(message)
+        except Exception as e:
+            logger.error(f"Claude API error for TMS {tms} (attempt {attempt}): {type(e).__name__}: {e}")
+            if attempt < ATTEMPTS:
+                continue
+            raise AnalysisError(f"AI analysis failed: {str(e)[:200]}") from e
+        try:
+            analysis = _parse_json(raw)
+            break
+        except json.JSONDecodeError as e:
+            stop = getattr(message, "stop_reason", None)
+            logger.error(f"Claude returned invalid JSON for TMS {tms} (attempt {attempt}, stop_reason={stop}): {e}")
+            if attempt < ATTEMPTS:
+                continue
+            raise AnalysisInvalidJSON("AI returned invalid response") from e
     analysis["model"] = model
     return finalize_analysis(analysis, land_basis(parcel), zoning)
 

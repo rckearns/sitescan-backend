@@ -207,9 +207,44 @@ def test_generate_analysis_with_fenced_json():
     assert "Base zoning: GB" in client.calls[0]["messages"][0]["content"]
 
 
+async def _no_zoning(parcel, tms):
+    return None
+
+
 def test_generate_analysis_invalid_json():
+    client = FakeClient(text="not json")
     with pytest.raises(pa.AnalysisInvalidJSON):
-        run(pa.generate_analysis({"TMS": "t"}, "t", client=FakeClient(text="not json")))
+        run(pa.generate_analysis({"TMS": "t"}, "t", client=client, zoning_lookup=_no_zoning))
+    assert len(client.calls) == pa.ATTEMPTS
+
+
+class FlakyClient(FakeClient):
+    """First call fails (raises or returns a bad answer), the second succeeds."""
+
+    def __init__(self, first):
+        super().__init__()
+        self.first = first
+
+    async def create(self, **kwargs):
+        if not self.calls and isinstance(self.first, Exception):
+            self.calls.append(kwargs)
+            raise self.first
+        good, self.text = self.text, (self.first if not self.calls else self.text)
+        out = await super().create(**kwargs)
+        self.text = good
+        return out
+
+
+@pytest.mark.parametrize("first", [RuntimeError("overloaded"), '{"scenarios": [', "Sorry, no JSON"])
+def test_generate_analysis_retries_once(first):
+    client = FlakyClient(first)
+    out = run(pa.generate_analysis({"TMS": "t", "LAND_APPR": 500000}, "t", client=client, zoning_lookup=_no_zoning))
+    assert len(client.calls) == 2 and out["recommended_scenario"] == "A"
+
+
+def test_non_dict_assumptions_are_skipped():
+    out = pa.finalize_analysis({"scenarios": [{"name": "X", "assumptions": ["bad"]}]}, 500000)
+    assert out["scenarios"] == [] and out["recommended_scenario"] is None
 
 
 # ─── save / staleness ────────────────────────────────────────────────────────

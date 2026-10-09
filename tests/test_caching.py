@@ -210,9 +210,30 @@ def test_county_falls_back_to_proxy_when_direct_times_out(monkeypatch):
         return httpx.Response(200, json={"type": "FeatureCollection", "features": [], "exceededTransferLimit": False})
 
     monkeypatch.setattr(parcels, "_zenrows_key", lambda: "zr-test"); monkeypatch.setattr("app.services.proxy.zenrows_key", lambda: "zr-test")
+    monkeypatch.setattr(parcels.asyncio, "sleep", _no_sleep)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     assert run(parcels.fetch_county_parcel_features(client)) == []
-    assert seen == ["gisccapps.charlestoncounty.org", "api.zenrows.com"]
+    county = "gisccapps.charlestoncounty.org"
+    assert seen == [county] * parcels.COUNTY_DIRECT_ATTEMPTS + ["api.zenrows.com"]
+
+
+async def _no_sleep(_):
+    return None
+
+
+def test_county_retries_a_slow_page_directly(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"type": "FeatureCollection", "features": [], "exceededTransferLimit": False})
+
+    monkeypatch.setattr(parcels, "_zenrows_key", lambda: "")
+    monkeypatch.setattr(parcels.asyncio, "sleep", _no_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert run(parcels.fetch_county_parcel_features(client)) == [] and len(calls) == 2
 
 
 def test_county_timeout_without_proxy_key_raises(monkeypatch):
@@ -220,6 +241,7 @@ def test_county_timeout_without_proxy_key_raises(monkeypatch):
         raise httpx.ReadTimeout("no answer", request=request)
 
     monkeypatch.setattr(parcels, "_zenrows_key", lambda: "")
+    monkeypatch.setattr(parcels.asyncio, "sleep", _no_sleep)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     with pytest.raises(httpx.TimeoutException):
         run(parcels.fetch_county_parcel_features(client))

@@ -32,7 +32,14 @@ from datetime import date
 
 # --- field regexes ---------------------------------------------------------
 
-ITEM_START_RE = re.compile(r"^\s*(\d{1,2})\.\s+(\S.*)$")
+ITEM_START_RE = re.compile(r"^\s*#?(\d{1,2})\.\s+(\S.*)$")   # TRC numbers items "#1."
+# TRC site-plan agendas use a labelled form: "Address: 1730 CLEMENTS FERRY RD City Project ID#: …".
+TRC_ADDRESS_RE = re.compile(r"^\s*Address:\s*(.+?)\s+City\s+Project\s+ID", re.IGNORECASE | re.MULTILINE)
+TRC_TMS_RE = re.compile(r"Primary\s+TMS:\s*[A-Z]?(\d{10})", re.IGNORECASE)
+TRC_ACRES_RE = re.compile(r"^\s*Acres:\s*([\d.]+)", re.IGNORECASE | re.MULTILINE)
+TRC_LOCATION_RE = re.compile(r"^\s*Location:\s*(.+?)\s+Submittal", re.IGNORECASE | re.MULTILINE)
+TRC_DESCRIPTION_RE = re.compile(r"^\s*Description:\s*(.+?)(?=^\s*REVIEW\s+HISTORY|\Z)",
+                                re.IGNORECASE | re.MULTILINE | re.DOTALL)
 CASE_NO_RE = re.compile(r"\b([A-Z]{2,4}\d{4}-\d{4,6})\b")
 TMS_RE = re.compile(r"TMS\s*#?\s*([0-9][0-9\-/ ,&]*[0-9])")
 COUNCIL_RE = re.compile(r"Council\s+District\s+(\d+)", re.IGNORECASE)
@@ -196,11 +203,31 @@ def _parse_body(item: AgendaItem, lines: list[str]) -> None:
             req_lines.append(line[REQUEST_RE.search(line).start():])
     item.request_text = re.sub(r"\s+", " ", " ".join(req_lines)).strip()
 
+    _parse_trc(item, body)
+
     # Rezoning targets: zoning codes mentioned after "to" in rezonings.
     if re.search(r"\brezon", item.request_text, re.IGNORECASE):
         tail = re.split(r"\bto\b", item.request_text, flags=re.IGNORECASE)
         if len(tail) > 1:
             item.rezoning_to = ZONING_CODE_RE.findall(tail[-1])
+
+
+def _parse_trc(item: AgendaItem, body: str) -> None:
+    """TRC items open with the project name; the street address is on a labelled line."""
+    m = TRC_ADDRESS_RE.search(body)
+    if not m:
+        return
+    name = re.sub(r"\s+eReview\s*$", "", item.address, flags=re.IGNORECASE).strip()
+    item.address = m.group(1).strip()
+    if m := TRC_TMS_RE.search(body):
+        item.tms = m.group(1)
+    if m := TRC_ACRES_RE.search(body):
+        item.acreage = float(m.group(1))
+    if m := TRC_LOCATION_RE.search(body):
+        item.neighborhood = m.group(1).strip()
+    desc = TRC_DESCRIPTION_RE.search(body)
+    desc_text = re.sub(r"\s+", " ", desc.group(1)).strip() if desc else ""
+    item.request_text = f"{name}: {desc_text}" if desc_text else name
 
 
 def parse_agenda_text(text: str) -> list[AgendaItem]:

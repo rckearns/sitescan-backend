@@ -189,11 +189,14 @@ def award_events(rows: list[dict]) -> list[PipelineEvent]:
 
 async def run_awards_job(session_factory=None, client: Optional[Any] = None) -> dict:
     """Read new notices from each agency page. Never raises."""
-    summary = {"pages": 0, "new_documents": 0, "rows": 0, "events": 0, "failed": 0}
+    summary = {"started_at": datetime.utcnow().isoformat(), "pages": {}, "new_documents": 0, "rows": 0,
+               "events": 0, "failed": 0, "errors": []}
     settings = get_settings()
     if client is None:
         if not settings.anthropic_api_key:
             logger.info("Awards job skipped: ANTHROPIC_API_KEY not configured")
+            summary["errors"].append("ANTHROPIC_API_KEY not configured")
+            await _record_run(session_factory or get_session_factory(), summary)
             return summary
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     session_factory = session_factory or get_session_factory()
@@ -203,9 +206,10 @@ async def run_awards_job(session_factory=None, client: Optional[Any] = None) -> 
         for agency, page in AGENCY_PAGES:
             try:
                 links = notice_links(await asyncio.to_thread(_fetch_text, page), page)
-                summary["pages"] += 1
+                summary["pages"][agency] = len(links)
             except Exception as e:
                 logger.warning(f"Awards: {agency} page failed: {type(e).__name__}: {e}")
+                summary["pages"][agency] = f"failed: {type(e).__name__}: {str(e)[:150]}"
                 summary["failed"] += 1
                 continue
             for url in links:
@@ -214,19 +218,42 @@ async def run_awards_job(session_factory=None, client: Optional[Any] = None) -> 
                 try:
                     pdf = await asyncio.to_thread(_fetch_bytes, url)
                     rows = [] if len(pdf) > MAX_PDF_BYTES else rows_from_extraction(await extract_notice(pdf, client), url, agency)
+                    await _save(session_factory, url, rows)
                 except Exception as e:
                     logger.warning(f"Awards: {url} failed: {type(e).__name__}: {e}")
                     summary["failed"] += 1
+                    if len(summary["errors"]) < 10:
+                        summary["errors"].append(f"{url.rsplit('/', 1)[-1]}: {type(e).__name__}: {str(e)[:200]}")
                     continue
-                await _save(session_factory, url, rows)
                 seen.add(url)
                 summary["new_documents"] += 1
                 summary["rows"] += len(rows)
                 summary["events"] += len(award_events(rows))
     except Exception as e:
         logger.error(f"Awards job failed: {e}", exc_info=True)
+        summary["errors"].append(f"job: {type(e).__name__}: {str(e)[:200]}")
+    summary["finished_at"] = datetime.utcnow().isoformat()
     logger.info(f"Awards job: {summary}")
+    await _record_run(session_factory, summary)
     return summary
+
+
+STATUS_KEY = "awards:last-run"
+
+
+async def _record_run(session_factory, summary: dict) -> None:
+    """Keep the last run's summary so /awards/status can show what happened."""
+    from app.models.database import CachedPayload
+    try:
+        async with session_factory() as db:
+            row = (await db.execute(select(CachedPayload).where(CachedPayload.key == STATUS_KEY))).scalars().first()
+            if row is None:
+                db.add(CachedPayload(key=STATUS_KEY, payload=summary, fetched_at=datetime.utcnow()))
+            else:
+                row.payload, row.fetched_at = summary, datetime.utcnow()
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Awards: couldn't record run summary: {e}")
 
 
 async def _save(session_factory, url: str, rows: list[dict]) -> None:

@@ -562,10 +562,12 @@ NOT_GC_NAME_RE = re.compile(
     r"fire|sprinkler|security|alarm|radio|communicat|utilit|logistic|controls|hood|elevator|"
     r"steel|iron\s*works|\bsigns?\b|survey|engineer|testing|crane|rental|supply|landscap|irrigat|"
     r"\bpools?\b|solar|low\s*voltage|audio|cabling|waterproof|drilling|abatement|insulation|"
-    r"millwork|cabinet|flooring|tile\b|marble|granite|kitchen",
+    r"millwork|cabinet|flooring|tile\b|marble|granite|kitchen|"
+    r"architect|associates|\bdesign\b(?![\s/-]*build)|planning|\bmse\b|retaining",
     re.IGNORECASE,
 )
-GC_NAME_RE = re.compile(r"construct|builder|building|contracting|general\s+contract|\bgc\b", re.IGNORECASE)
+GC_NAME_RE = re.compile(r"construct|builder|building|contracting|general\s+contract|\bgc\b|design[\s/-]*build",
+                        re.IGNORECASE)
 
 
 def is_gc(name: str, licenses: list[dict]) -> bool:
@@ -637,7 +639,7 @@ def sub_trade(name: str, licenses: list[dict]) -> str:
 _ROSTER_HINTS = [
     ("fire-protection", re.compile(r"fire|sprinkler|alarm|security|radio|communicat|low\s*voltage", re.IGNORECASE)),
     ("grading-sitework", re.compile(r"utilit|site\s*logistic", re.IGNORECASE)),
-    ("hvac", re.compile(r"\bcontrols\b|chiller", re.IGNORECASE)),
+    ("hvac", re.compile(r"\bcontrols\b|chiller|hood\s*system", re.IGNORECASE)),
 ]
 
 

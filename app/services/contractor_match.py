@@ -636,14 +636,17 @@ def _median(values: list[float]) -> float:
     return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
 
 
-def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | None) -> list[dict[str, Any]]:
+def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | None,
+                        categories: set | None = None) -> list[dict[str, Any]]:
     """General contractors on commercial permits of at least `min_value`, ranked by total value.
 
     Residential permits and companies whose name says they're a specialty trade are left out.
     """
     leaders: dict[str, dict[str, Any]] = {}
     for p in projects:
-        if (p.value or 0) < min_value or (p.category or "") == "residential":
+        if (p.value or 0) < min_value or (p.category or "") in NOT_BUILDING_CATEGORIES:
+            continue
+        if categories and (p.category or "") not in categories:
             continue
         if since and (p.posted_date is None or p.posted_date < since):
             continue
@@ -679,7 +682,8 @@ def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | N
     return out
 
 
-async def gc_leaderboard(min_value: float = 1_000_000, days: int = 730, limit: int = 50) -> dict[str, Any]:
+async def gc_leaderboard(min_value: float = 1_000_000, days: int = 730, limit: int = 50,
+                         categories: list | None = None) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=days) if days else None
     async with get_session_factory()() as db:
         conds = [Project.source_id.in_(PERMIT_SOURCES), Project.value >= min_value,
@@ -687,5 +691,142 @@ async def gc_leaderboard(min_value: float = 1_000_000, days: int = 730, limit: i
         if since:
             conds.append(Project.posted_date >= since)
         projects = (await db.execute(select(Project).where(*conds))).scalars().all()
-    leaders = gc_leaderboard_from(projects, min_value=min_value, since=since)
-    return {"min_value": min_value, "days": days, "total": len(leaders), "contractors": leaders[:limit]}
+    leaders = gc_leaderboard_from(projects, min_value=min_value, since=since, categories=set(categories or []) or None)
+    return {"min_value": min_value, "days": days, "categories": categories or [],
+            "total": len(leaders), "contractors": leaders[:limit]}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Subs: trade permits on the same site as a GC's building permit
+# ──────────────────────────────────────────────────────────────────────────────
+# City of Charleston files electrical, plumbing, mechanical, fire and roofing work as
+# separate permits naming the trade contractor. They aren't linked to the building
+# permit, but they share its parcel, so a trade permit on the same parcel from shortly
+# before to two years after the building permit is taken as that job's sub.
+
+TRADE_CATEGORIES = {
+    "electrical": "Electrical",
+    "plumbing": "Plumbing & gas",
+    "mechanical": "Mechanical / HVAC",
+    "fire-sprinkler": "Fire protection",
+    "roofing": "Roofing",
+    "painting": "Painting",
+}
+NOT_BUILDING_CATEGORIES = {"residential", "trade-permit", *TRADE_CATEGORIES}
+SUB_WINDOW_BEFORE = timedelta(days=90)
+SUB_WINDOW_AFTER = timedelta(days=730)
+SUB_SOURCE = "charleston-permits"   # the only source that stores trade permits
+
+
+def _site(p) -> str | None:
+    """Parcel number when the permit has one, else the street address without unit/master suffixes."""
+    raw = getattr(p, "raw_data", None) or {}
+    parcel = str(raw.get("MAIN_PARCEL_NUMBER") or "").strip().upper() if isinstance(raw, dict) else ""
+    if parcel:
+        return "P:" + parcel
+    addr = re.sub(r"\s+", " ", (getattr(p, "address", "") or "").upper()).strip()
+    addr = re.sub(r"\s+(MASTER|BLDG\b.*|BUILDING\b.*|UNIT\b.*|STE\b.*|SUITE\b.*|#.*)$", "", addr)
+    return "A:" + addr if addr else None
+
+
+def link_subs(jobs: list, trade_permits: list) -> list[tuple]:
+    """(job, trade permit, sub name) for each trade permit on a job's site inside the window."""
+    by_site: dict[str, list] = {}
+    for t in trade_permits:
+        site = _site(t)
+        if site and t.posted_date:
+            by_site.setdefault(site, []).append(t)
+    links = []
+    for job in jobs:
+        site = _site(job)
+        if not site or not job.posted_date:
+            continue
+        lo, hi = job.posted_date - SUB_WINDOW_BEFORE, job.posted_date + SUB_WINDOW_AFTER
+        job_names = {normalize_name(n) for n in _names(job.contractor)}
+        for t in by_site.get(site, []):
+            if not (lo <= t.posted_date <= hi):
+                continue
+            for name in _names(t.contractor):
+                if normalize_name(name) not in job_names:
+                    links.append((job, t, name))
+    return links
+
+
+def _job_out(job) -> dict[str, Any]:
+    return {"id": job.id, "address": job.address, "value": job.value,
+            "date": job.posted_date.isoformat() if job.posted_date else None,
+            "gc": max(_names(job.contractor), key=len) if _names(job.contractor) else ""}
+
+
+def aggregate_subs(links: list[tuple], per_trade: int = 15) -> dict[str, Any]:
+    """Group linked subs by trade, ranked by how many distinct jobs they worked."""
+    trades: dict[str, dict[str, dict]] = {}
+    for job, t, name in links:
+        trade = t.category if t.category in TRADE_CATEGORIES else None
+        if not trade:
+            continue
+        key = normalize_name(name)
+        if not key:
+            continue
+        e = trades.setdefault(trade, {}).setdefault(key, {
+            "key": key, "names": set(), "jobs": {}, "gcs": set(), "last_date": None})
+        e["names"].add(name)
+        e["jobs"][job.id] = job
+        e["gcs"].update(n for n in _names(job.contractor))
+        if t.posted_date and (e["last_date"] is None or t.posted_date > e["last_date"]):
+            e["last_date"] = t.posted_date
+    out = {}
+    for trade, subs in trades.items():
+        rows = []
+        for e in subs.values():
+            jobs = sorted(e["jobs"].values(), key=lambda j: j.value or 0, reverse=True)
+            rows.append({
+                "key": e["key"],
+                "name": max(e["names"], key=len),
+                "job_count": len(jobs),
+                "job_value": sum(j.value or 0 for j in jobs),
+                "gcs": sorted(e["gcs"])[:6],
+                "last_date": e["last_date"].isoformat() if e["last_date"] else None,
+                "jobs": [_job_out(j) for j in jobs[:5]],
+            })
+        rows.sort(key=lambda r: (r["job_count"], r["job_value"]), reverse=True)
+        out[trade] = {"label": TRADE_CATEGORIES[trade], "subs": rows[:per_trade], "total": len(rows)}
+    order = list(TRADE_CATEGORIES)
+    return dict(sorted(out.items(), key=lambda kv: order.index(kv[0])))
+
+
+async def _trade_permits(db: AsyncSession, since: datetime | None) -> list:
+    conds = [Project.source_id == SUB_SOURCE, Project.category.in_(list(TRADE_CATEGORIES)),
+             Project.contractor.is_not(None), Project.contractor != ""]
+    if since:
+        conds.append(Project.posted_date >= since)
+    return (await db.execute(select(Project).where(*conds))).scalars().all()
+
+
+async def subs_for_gc(key: str) -> dict[str, Any]:
+    """The trade contractors who've worked on this GC's City of Charleston jobs."""
+    key = (key or "").strip().lower()
+    async with get_session_factory()() as db:
+        rows = (await db.execute(select(Project).where(
+            Project.source_id == SUB_SOURCE, Project.contractor.ilike(f"%{_prefilter_word(key)}%"),
+        ))).scalars().all()
+        jobs = [p for p in rows if (p.category or "") not in NOT_BUILDING_CATEGORIES
+                and any(normalize_name(n) == key for n in _names(p.contractor))]
+        dates = [j.posted_date for j in jobs if j.posted_date]
+        trade = await _trade_permits(db, min(dates) - SUB_WINDOW_BEFORE) if dates else []
+    return {"key": key, "jobs_checked": len(jobs), "trades": aggregate_subs(link_subs(jobs, trade))}
+
+
+async def proven_subs(min_value: float = 5_000_000, days: int = 1825) -> dict[str, Any]:
+    """Trade contractors on commercial City of Charleston jobs of at least `min_value`."""
+    since = datetime.utcnow() - timedelta(days=days) if days else None
+    async with get_session_factory()() as db:
+        conds = [Project.source_id == SUB_SOURCE, Project.value >= min_value,
+                 Project.category.not_in(list(NOT_BUILDING_CATEGORIES)),
+                 Project.contractor.is_not(None), Project.contractor != ""]
+        if since:
+            conds.append(Project.posted_date >= since)
+        jobs = (await db.execute(select(Project).where(*conds))).scalars().all()
+        trade = await _trade_permits(db, (since - SUB_WINDOW_BEFORE) if since else None)
+    return {"min_value": min_value, "days": days, "jobs_checked": len(jobs),
+            "trades": aggregate_subs(link_subs(jobs, trade))}

@@ -140,12 +140,37 @@ async def gc_leaders(
     min_value: float = Query(1_000_000, ge=0, description="Smallest permit value that counts"),
     days: int = Query(730, ge=0, le=3650, description="Look-back window in days (0 = all time)"),
     limit: int = Query(50, ge=1, le=200),
+    categories: str = Query("", description="Comma-separated permit categories, e.g. healthcare,education"),
     _user=Depends(get_current_user),
 ):
     """General contractors winning commercial permits of at least `min_value`, ranked by total value."""
     from app.services.contractor_match import gc_leaderboard
 
-    return await gc_leaderboard(min_value=min_value, days=days, limit=limit)
+    cats = [c.strip() for c in categories.split(",") if c.strip()]
+    return await gc_leaderboard(min_value=min_value, days=days, limit=limit, categories=cats)
+
+
+@router.get("/trades/contractor/subs")
+async def contractor_subs(
+    key: str = Query(..., description="GC key from the roster or leaderboard"),
+    _user=Depends(get_current_user),
+):
+    """Trade contractors who've worked this GC's City of Charleston jobs, by trade."""
+    from app.services.contractor_match import subs_for_gc
+
+    return await subs_for_gc(key)
+
+
+@router.get("/subs")
+async def subs_on_big_jobs(
+    min_value: float = Query(5_000_000, ge=0, description="Smallest building permit that counts"),
+    days: int = Query(1825, ge=0, le=3650, description="Look-back window in days (0 = all time)"),
+    _user=Depends(get_current_user),
+):
+    """Trade contractors proven on large commercial City of Charleston jobs, by trade."""
+    from app.services.contractor_match import proven_subs
+
+    return await proven_subs(min_value=min_value, days=days)
 
 
 @router.get("/trades/list")

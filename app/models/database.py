@@ -390,6 +390,30 @@ class GeocodeEntry(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ContractAward(Base):
+    """A firm named on a state award, shortlist or prequalification notice (OSE SE-forms)
+    posted by a Charleston-area agency."""
+    __tablename__ = "contract_awards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_url = Column(String(1000), nullable=False, index=True)
+    agency = Column(String(255), default="")
+    form = Column(String(20), default="")              # e.g. "SE-370"
+    notice_type = Column(String(30), default="")       # award / shortlist / selection / prequalified
+    delivery = Column(String(30), default="")          # design-bid-build / cmr / design-build / professional / idq / task-order
+    project_name = Column(String(500), default="")
+    project_number = Column(String(60), default="")
+    pip_number = Column(String(20), default="", index=True)
+    firm = Column(String(255), nullable=False)
+    firm_key = Column(String(255), default="", index=True)
+    role = Column(String(30), default="")              # contractor / cm / design-builder / architect-engineer
+    amount = Column(Float, nullable=True)
+    posted_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("source_url", "project_number", "firm", "notice_type", name="uq_award_firm"),)
+
+
 class CachedPayload(Base):
     """A saved copy of an expensive external fetch (e.g. the county parcel list)."""
     __tablename__ = "cached_payloads"

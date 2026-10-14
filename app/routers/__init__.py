@@ -7,3 +7,4 @@ from app.routers.directory import router as directory_router
 from app.routers.analyze import router as analyze_router
 from app.routers.boards import router as boards_router
 from app.routers.pipeline import router as pipeline_router
+from app.routers.awards import router as awards_router

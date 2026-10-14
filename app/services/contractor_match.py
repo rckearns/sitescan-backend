@@ -579,6 +579,24 @@ def is_gc(name: str, licenses: list[dict]) -> bool:
     return bool(GC_NAME_RE.search(name))
 
 
+def _neutral(name: str, licenses: list[dict]) -> bool:
+    """Not obviously a trade: no trade words, no trade-only license (could be an out-of-town GC)."""
+    if NOT_GC_NAME_RE.search(name) or infer_trade_from_name(name) not in (None, "general"):
+        return False
+    classes = {str(lic.get("classification") or "").upper() for lic in licenses}
+    return not classes or bool(classes & GC_LICENSES)
+
+
+def job_gcs(job: "Job", llr: "LlrIndex") -> set:
+    """Normalized names of the job's GC(s). If no company passes `is_gc` (an out-of-town GC
+    without a local license or "Construction" in its name, e.g. B L Harbert International),
+    the job's neutral names are taken as the GC."""
+    strict = {k for k, n in job.names.items() if is_gc(n, llr.match(k))}
+    if strict:
+        return strict
+    return {k for k, n in job.names.items() if _neutral(n, llr.match(k))}
+
+
 # Trades for the sub lists: from the permit type on trade permits, or the company's
 # name / license when a sub is named on a building permit.
 SUB_TRADES = {
@@ -616,6 +634,20 @@ def sub_trade(name: str, licenses: list[dict]) -> str:
 # Trade roster (By trade view)
 # ──────────────────────────────────────────────────────────────────────────────
 
+_ROSTER_HINTS = [
+    ("fire-protection", re.compile(r"fire|sprinkler|alarm|security|radio|communicat|low\s*voltage", re.IGNORECASE)),
+    ("grading-sitework", re.compile(r"utilit|site\s*logistic", re.IGNORECASE)),
+    ("hvac", re.compile(r"\bcontrols\b|chiller", re.IGNORECASE)),
+]
+
+
+def _roster_hint(name: str) -> str | None:
+    for trade, rx in _ROSTER_HINTS:
+        if rx.search(name):
+            return trade
+    return None
+
+
 def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_value: float = 0,
                 now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.utcnow()
@@ -637,7 +669,7 @@ def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_
             continue
         display_name = max(cdata["names"], key=len)
         licenses = llr.match(norm)
-        assigned = infer_trade_from_name(display_name)
+        assigned = infer_trade_from_name(display_name) or _roster_hint(display_name)
         if not assigned:
             for lic in licenses:
                 assigned = _LLR_TRADE_MAP.get(lic["classification"])
@@ -765,8 +797,9 @@ def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | N
             continue
         if categories and (job.category or "") not in categories:
             continue
+        gcs = job_gcs(job, llr)
         for key, name in job.names.items():
-            if not is_gc(name, llr.match(key)):
+            if key not in gcs:
                 continue
             e = leaders.setdefault(key, {"key": key, "names": set(), "jobs": [], "categories": {}})
             e["names"].add(name)
@@ -832,7 +865,7 @@ def link_subs(jobs: list[Job], trade_permits: list, llr: LlrIndex | None = None)
             by_site.setdefault(site, []).append(t)
     links = []
     for job in jobs:
-        gc_keys = {k for k, n in job.names.items() if is_gc(n, llr.match(k))}
+        gc_keys = job_gcs(job, llr)
         for key, name in job.names.items():
             if key not in gc_keys:
                 links.append((job, sub_trade(name, llr.match(key)), name, job.first_date))
@@ -862,7 +895,7 @@ def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: i
             "key": key, "names": set(), "jobs": {}, "gcs": set(), "last_date": None})
         e["names"].add(name)
         e["jobs"][job.id] = job
-        e["gcs"].update(n for k, n in job.names.items() if is_gc(n, llr.match(k)))
+        e["gcs"].update(job.names[k] for k in job_gcs(job, llr))
         if when and (e["last_date"] is None or when > e["last_date"]):
             e["last_date"] = when
     out = {}

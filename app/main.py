@@ -20,7 +20,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from app.config import Settings, get_settings
 from app.models.database import init_db, get_session_factory
-from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router, pipeline_router
+from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router, pipeline_router, awards_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
 from app.services.parcel_analysis import run_parcel_estimates_job
@@ -73,6 +73,12 @@ async def boards_scrape_job():
 async def gc_pipeline_job():
     """Pull GC pipeline sources and classify changed projects (never raises)."""
     await run_pipeline_job()
+
+
+async def awards_job():
+    """Read new state award / shortlist notices from agency pages (never raises)."""
+    from app.services.awards import run_awards_job
+    await run_awards_job()
 
 
 async def parcel_estimates_job():
@@ -186,6 +192,23 @@ async def lifespan(app: FastAPI):
         name="GC pipeline (startup)",
         replace_existing=True,
     )
+    # State award notices: daily at 10:30 UTC plus ~9 min after startup.
+    scheduler.add_job(
+        awards_job,
+        trigger=CronTrigger(hour=10, minute=30, timezone="UTC"),
+        id="awards_daily",
+        name="State award notices (daily)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        awards_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(minutes=9)),
+        id="awards_startup",
+        name="State award notices (startup)",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(f"Scheduler started — scanning every {settings.scan_cron_hours} hours")
     
@@ -265,6 +288,7 @@ app.include_router(directory_router, prefix="/api/v1")
 app.include_router(analyze_router, prefix="/api/v1")
 app.include_router(boards_router, prefix="/api/v1")
 app.include_router(pipeline_router, prefix="/api/v1")
+app.include_router(awards_router, prefix="/api/v1")
 
 
 # ─── HEALTH CHECK ────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ STAGES = (
     "cmr-solicitation",    # CM at Risk RFQ/RFP
     "design-build-solicitation",
     "bid",                 # design-bid-build / IFB / ITB
+    "award",               # agency notice: shortlist or intent to award (who's competing / who won)
     "other",
 )
 

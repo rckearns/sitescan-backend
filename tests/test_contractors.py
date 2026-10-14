@@ -127,3 +127,21 @@ def test_contractor_permits_groups_jobs_newest_first():
     out = asyncio.run(go())
     assert out["job_count"] == 2 and out["permit_count"] == 3 and out["total_value"] == 35e6
     assert [p["value"] for p in out["permits"]] == [5e6, 30e6]
+
+
+def test_out_of_town_gc_without_license_is_the_gc_when_no_one_else_is():
+    job = _p("B L Harbert International | VSC Fire & Security | Hallway Plumbing LLC", 60e6, "hotel", parcel="H1")
+    out = cm.gc_leaderboard_from([job], min_value=1e6, since=None, llr=cm.LlrIndex({}))
+    assert [c["name"] for c in out] == ["B L Harbert International"]
+    subs = cm.aggregate_subs(cm.link_subs(cm.group_jobs([job]), [], cm.LlrIndex({})), cm.LlrIndex({}))
+    assert set(subs) == {"fire-sprinkler", "plumbing"}
+    assert subs["plumbing"]["subs"][0]["gcs"] == ["B L Harbert International"]
+    with_gc = _p("Choate Construction Company | Scout Services", 10e6, parcel="H2")
+    assert [c["name"] for c in cm.gc_leaderboard_from([with_gc], min_value=1e6, since=None)] == ["Choate Construction Company"]
+
+
+def test_roster_puts_fire_and_controls_companies_in_their_trades():
+    projects = [_p("VSC Fire & Security", 1e6, "commercial"), _p("Johnson Controls, Inc.", 1e6, "commercial")]
+    out = cm.roster_from(projects, cm.LlrIndex({}), now=NOW)
+    assert "general" not in out["trades"]
+    assert out["trades"]["fire-protection"]["contractors"][0]["name"] == "VSC Fire & Security"

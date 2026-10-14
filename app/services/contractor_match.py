@@ -393,208 +393,310 @@ def infer_trade_from_name(company_name: str) -> str | None:
     return None
 
 
-def _fuzzy_match_llr(norm: str, llr_map: dict[str, list]) -> list[dict]:
-    """Find LLR license entries for a normalized contractor name."""
-    # Exact
-    if norm in llr_map:
-        return llr_map[norm]
-    # Fuzzy
-    for llr_norm, entries in llr_map.items():
-        a, b = norm, llr_norm
-        if a == b:
-            return entries
-        if a in b or b in a:
-            return entries
-        ta, tb = _name_tokens(a), _name_tokens(b)
-        if ta and tb:
-            inter = ta & tb
-            union = ta | tb
-            if union and len(inter) / len(union) >= 0.6 and (
-                len(inter) >= 2 or len(inter) >= min(len(ta), len(tb))
-            ):
-                return entries
-    return []
+# ──────────────────────────────────────────────────────────────────────────────
+# SC LLR license lookup
+# ──────────────────────────────────────────────────────────────────────────────
+
+class LlrIndex:
+    """License entries by normalized company name, with token-indexed fuzzy matching
+    (comparing every name against all ~3,500 licenses one by one took ~9s per request)."""
+
+    def __init__(self, entries: dict[str, list[dict]]):
+        self.entries = entries
+        self.by_token: dict[str, set] = {}
+        for norm in entries:
+            for tok in _name_tokens(norm):
+                if len(tok) > 2:
+                    self.by_token.setdefault(tok, set()).add(norm)
+        self._cache: dict[str, list[dict]] = {}
+
+    def match(self, norm: str) -> list[dict]:
+        if norm in self._cache:
+            return self._cache[norm]
+        found = self.entries.get(norm) or self._fuzzy(norm)
+        self._cache[norm] = found
+        return found
+
+    def _fuzzy(self, norm: str) -> list[dict]:
+        ta = _name_tokens(norm)
+        candidates = set().union(*[self.by_token.get(t, set()) for t in ta if len(t) > 2]) if ta else set()
+        best, best_score = None, 0.0
+        for cand in candidates:
+            tb = _name_tokens(cand)
+            inter, union = ta & tb, ta | tb
+            score = len(inter) / len(union) if union else 0
+            # One name containing the other counts only for multi-word names ("hill" ≠ "churchill").
+            contained = (norm in cand or cand in norm) and min(len(ta), len(tb)) >= 2
+            if (contained or (score >= 0.6 and (len(inter) >= 2 or len(inter) >= min(len(ta), len(tb))))) and score > best_score:
+                best, best_score = cand, score
+        return self.entries[best] if best else []
 
 
-async def build_permit_trade_roster(
-    trade: str | None = None,
-    source: str | None = None,
-    min_value: float = 0,
-) -> dict[str, Any]:
-    """
-    Build a contractor roster grouped by trade, ranked by permit activity.
+_llr_cache: dict[str, Any] = {"at": 0.0, "index": None}
+LLR_CACHE_SECONDS = 3600
 
-    Trade is determined by (in priority order):
-    1. The contractor's company name (e.g. "ABC Framing LLC" → framing)
-    2. Their SC LLR license classification (e.g. SF → framing, MS → masonry)
-    3. Falls back to "general" if neither signal is present
 
-    Permit data provides the market share signal: total value, permit count,
-    most recent activity.
-
-    Args:
-        trade: Filter to one trade (e.g. "framing"). None = all trades.
-        source: Filter by permit source_id. None = all sources.
-        min_value: Minimum total permit value to include a contractor.
-    """
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        # 1. Load all projects with contractor names
-        conditions = [
-            Project.contractor != "",
-            Project.contractor.is_not(None),
-        ]
-        if source:
-            conditions.append(Project.source_id == source)
-
-        proj_result = await session.execute(
-            select(Project).where(*conditions)
-        )
-        projects = proj_result.scalars().all()
-
-        # 2. Build contractor → permit stats (keyed by normalized name)
-        contractor_map: dict[str, dict[str, Any]] = {}
-
-        for p in projects:
-            raw = (p.contractor or "").strip()
-            if not raw:
-                continue
-            for name in raw.split("|"):
-                name = name.strip()
-                if not name:
-                    continue
-                norm = normalize_name(name)
-                if not norm:
-                    continue
-
-                if norm not in contractor_map:
-                    contractor_map[norm] = {
-                        "original_names": set(),
-                        "permit_count": 0,
-                        "total_value": 0.0,
-                        "last_date": None,
-                    }
-                entry = contractor_map[norm]
-                entry["original_names"].add(name)
-                entry["permit_count"] += 1
-                if p.value:
-                    entry["total_value"] += p.value
-                if p.posted_date:
-                    if entry["last_date"] is None or p.posted_date > entry["last_date"]:
-                        entry["last_date"] = p.posted_date
-
-        # 3. Load LLR directory for license-based trade + enrichment
-        llr_map: dict[str, list[dict]] = {}
-        dir_result = await session.execute(select(DirectoryEntry))
-        for de in dir_result.scalars().all():
-            de_norm = normalize_name(de.company_name)
-            if de_norm:
-                llr_map.setdefault(de_norm, []).append({
-                    "classification": de.classification,
-                    "trade_label": de.trade_label,
-                    "license_status": de.license_status,
-                    "license_number": de.external_id,
-                })
-
-        # 4. Assign each contractor a trade and build the roster
-        trade_roster: dict[str, list] = {}
-
-        for norm, cdata in contractor_map.items():
-            # Skip below minimum value
-            if cdata["total_value"] < min_value:
-                continue
-
-            display_name = max(cdata["original_names"], key=len)
-
-            # Determine trade: name first, then LLR, then "general"
-            assigned_trade = infer_trade_from_name(display_name)
-
-            licenses = _fuzzy_match_llr(norm, llr_map)
-
-            if not assigned_trade and licenses:
-                # Use the first LLR classification that maps to a trade
-                for lic in licenses:
-                    llr_trade = _LLR_TRADE_MAP.get(lic["classification"])
-                    if llr_trade:
-                        assigned_trade = llr_trade
-                        break
-
-            if not assigned_trade:
-                assigned_trade = "general"
-
-            # Apply trade filter
-            if trade and assigned_trade != trade:
-                continue
-
-            if assigned_trade not in trade_roster:
-                trade_roster[assigned_trade] = []
-
-            trade_roster[assigned_trade].append({
-                "key": norm,
-                "name": display_name,
-                "also_known_as": sorted(cdata["original_names"] - {display_name}),
-                "trade": assigned_trade,
-                "permit_count": cdata["permit_count"],
-                "total_permit_value": cdata["total_value"],
-                "last_permit_date": (
-                    cdata["last_date"].isoformat() if cdata["last_date"] else None
-                ),
-                "licenses": licenses,
+async def load_llr_index(session: AsyncSession) -> LlrIndex:
+    import time
+    if _llr_cache["index"] is not None and time.time() - _llr_cache["at"] < LLR_CACHE_SECONDS:
+        return _llr_cache["index"]
+    entries: dict[str, list[dict]] = {}
+    for de in (await session.execute(select(DirectoryEntry))).scalars().all():
+        norm = normalize_name(de.company_name)
+        if norm:
+            entries.setdefault(norm, []).append({
+                "classification": de.classification, "trade_label": de.trade_label,
+                "license_status": de.license_status, "license_number": de.external_id,
             })
+    index = LlrIndex(entries)
+    _llr_cache.update(at=time.time(), index=index)
+    return index
 
-        # 5. Sort by total_permit_value desc, compute market share
-        result: dict[str, Any] = {}
-        for tid in sorted(trade_roster.keys()):
-            contractors = trade_roster[tid]
-            contractors.sort(key=lambda c: c["total_permit_value"], reverse=True)
-            total_value = sum(c["total_permit_value"] for c in contractors)
-            for c in contractors:
-                c["market_share_pct"] = round(
-                    (c["total_permit_value"] / total_value * 100), 1
-                ) if total_value > 0 else 0.0
-            result[tid] = {
-                "label": TRADE_LABELS.get(tid, tid),
-                "total_contractors": len(contractors),
-                "total_permit_value": total_value,
-                "contractors": contractors,
-            }
 
-        return {
-            "total_trades": len(result),
-            "total_contractors": sum(
-                len(t["contractors"]) for t in result.values()
-            ),
-            "trades": result,
-        }
+def _fuzzy_match_llr(norm: str, llr_map: dict[str, list]) -> list[dict]:
+    """Kept for callers that pass a plain dict."""
+    return LlrIndex(llr_map).match(norm)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# One contractor's permits, and the GC leaderboard
+# Jobs: permits on one site grouped together
 # ──────────────────────────────────────────────────────────────────────────────
+# Big projects are permitted in phases (one permit per floor or area), and each phase
+# permit can repeat the whole project's value. Permits on the same parcel within a year
+# of each other are one job, valued at its largest permit.
 
-PERMIT_SOURCES = ("charleston-permits", "north-charleston-permits", "mt-pleasant-permits")
-CONTRACTOR_PERMIT_LIMIT = 200
+JOB_GAP = timedelta(days=365)
+OPEN_RE = re.compile(r"issued|active|open|review|applied|pending|hold|approved", re.IGNORECASE)
+OPEN_WITHIN = timedelta(days=3 * 365)
 
 
 def _names(contractor_field: str | None) -> list[str]:
     return [n.strip() for n in (contractor_field or "").split("|") if n.strip()]
 
 
-def _permit_out(p: Project) -> dict[str, Any]:
+def _site(p) -> str | None:
+    """Parcel number when the permit has one, else the street address without unit/floor suffixes."""
+    raw = getattr(p, "raw_data", None) or {}
+    parcel = str(raw.get("MAIN_PARCEL_NUMBER") or "").strip().upper() if isinstance(raw, dict) else ""
+    if parcel:
+        return "P:" + parcel
+    addr = re.sub(r"\s+", " ", (getattr(p, "address", "") or "").upper()).strip()
+    m = re.match(r"(\d+[A-Z]?\s+(?:[NSEW]\s+)?[A-Z0-9.'-]+(?:\s+(?:ST|AVE|RD|DR|LN|PL|BLVD|HWY|WAY|CT|CIR|PKWY|TRL|SQ))?)", addr)
+    addr = m.group(1) if m else addr
+    return "A:" + addr if addr else None
+
+
+class Job:
+    """One project on one site: its permits, largest value and everyone named on them."""
+
+    def __init__(self, permits: list):
+        permits = sorted(permits, key=lambda p: p.posted_date or datetime.min)
+        main = max(permits, key=lambda p: p.value or 0)
+        self.permits = permits
+        self.id = main.id
+        self.value = main.value or 0
+        self.category = main.category
+        self.address = re.sub(r"\s+(MASTER\b.*|/.*)$", "", (main.address or "").strip(), flags=re.IGNORECASE)
+        self.title = getattr(main, "title", "")
+        self.source_id = getattr(main, "source_id", "")
+        self.source_url = getattr(main, "source_url", "")
+        self.permit_number = getattr(main, "permit_number", "")
+        self.latitude, self.longitude = getattr(main, "latitude", None), getattr(main, "longitude", None)
+        self.city = getattr(main, "location", "")
+        dates = [p.posted_date for p in permits if p.posted_date]
+        self.first_date = min(dates) if dates else None
+        self.last_date = max(dates) if dates else None
+        self.posted_date = self.first_date
+        names: dict[str, str] = {}
+        for p in permits:
+            for n in _names(p.contractor):
+                k = normalize_name(n)
+                if k and (k not in names or len(n) > len(names[k])):
+                    names[k] = n
+        self.names = names            # normalized → display name
+        self.is_open = any(OPEN_RE.search(getattr(p, "status", "") or "") for p in permits)
+
+    def out(self, gcs: list | None = None) -> dict[str, Any]:
+        return {
+            "id": self.id, "title": self.title, "address": self.address, "city": self.city,
+            "value": self.value, "category": self.category,
+            "date": self.first_date.isoformat() if self.first_date else None,
+            "last_date": self.last_date.isoformat() if self.last_date else None,
+            "permit_number": self.permit_number, "permit_count": len(self.permits),
+            "latitude": self.latitude, "longitude": self.longitude,
+            "source_id": self.source_id, "source_url": self.source_url,
+            "open": self.is_open, **({"gcs": gcs} if gcs is not None else {}),
+        }
+
+
+def group_jobs(permits: list) -> list[Job]:
+    by_site: dict[str, list] = {}
+    for p in permits:
+        by_site.setdefault(_site(p) or f"ID:{p.id}", []).append(p)
+    jobs = []
+    for group in by_site.values():
+        group.sort(key=lambda p: p.posted_date or datetime.min)
+        current: list = []
+        for p in group:
+            if current and p.posted_date and current[-1].posted_date and p.posted_date - current[-1].posted_date > JOB_GAP:
+                jobs.append(Job(current))
+                current = []
+            current.append(p)
+        if current:
+            jobs.append(Job(current))
+    return jobs
+
+
+def _is_open_job(job: Job, now: datetime) -> bool:
+    return job.is_open and bool(job.last_date) and now - job.last_date <= OPEN_WITHIN
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Who's the GC on a permit
+# ──────────────────────────────────────────────────────────────────────────────
+# Building permits list everyone with a contractor role, so a hotel permit can name the
+# GC plus its radio, hood and fire alarm installers.
+
+GC_LICENSES = {"BD", "CCM"}
+NOT_GC_NAME_RE = re.compile(
+    r"fire|sprinkler|security|alarm|radio|communicat|utilit|logistic|controls|hood|elevator|"
+    r"steel|iron\s*works|\bsigns?\b|survey|engineer|testing|crane|rental|supply|landscap|irrigat|"
+    r"\bpools?\b|solar|low\s*voltage|audio|cabling|waterproof|drilling|abatement|insulation|"
+    r"millwork|cabinet|flooring|tile\b|marble|granite|kitchen",
+    re.IGNORECASE,
+)
+GC_NAME_RE = re.compile(r"construct|builder|building|contracting|general\s+contract|\bgc\b", re.IGNORECASE)
+
+
+def is_gc(name: str, licenses: list[dict]) -> bool:
+    if NOT_GC_NAME_RE.search(name) or infer_trade_from_name(name) not in (None, "general"):
+        return False
+    classes = {str(lic.get("classification") or "").upper() for lic in licenses}
+    if classes & GC_LICENSES:
+        return True
+    if classes:                    # licensed, but only for a trade
+        return False
+    return bool(GC_NAME_RE.search(name))
+
+
+# Trades for the sub lists: from the permit type on trade permits, or the company's
+# name / license when a sub is named on a building permit.
+SUB_TRADES = {
+    "electrical": "Electrical", "plumbing": "Plumbing & gas", "mechanical": "Mechanical / HVAC",
+    "fire-sprinkler": "Fire protection & alarm", "roofing": "Roofing", "masonry": "Masonry",
+    "concrete": "Concrete", "framing": "Framing", "drywall-finishes": "Drywall, paint & finishes",
+    "windows-doors": "Glass, windows & doors", "siding-exterior": "Siding & exterior",
+    "grading-sitework": "Sitework & utilities", "insulation": "Insulation", "demolition": "Demolition",
+    "painting": "Painting", "other": "Other specialty",
+}
+TRADE_CATEGORIES = {k: SUB_TRADES[k] for k in ("electrical", "plumbing", "mechanical", "fire-sprinkler", "roofing", "painting")}
+_NAME_TRADE_TO_SUB = {"hvac": "mechanical", "fire-protection": "fire-sprinkler"}
+_SUB_NAME_HINTS = [
+    ("fire-sprinkler", re.compile(r"fire|sprinkler|alarm|security|radio|communicat|low\s*voltage", re.IGNORECASE)),
+    ("grading-sitework", re.compile(r"utilit|site\s*logistic|paving|grading|excavat", re.IGNORECASE)),
+]
+NOT_BUILDING_CATEGORIES = {"residential", "trade-permit", *TRADE_CATEGORIES}
+
+
+def sub_trade(name: str, licenses: list[dict]) -> str:
+    t = infer_trade_from_name(name)
+    if t and t != "general":
+        return _NAME_TRADE_TO_SUB.get(t, t if t in SUB_TRADES else "other")
+    for trade, rx in _SUB_NAME_HINTS:
+        if rx.search(name):
+            return trade
+    for lic in licenses:
+        t = _LLR_TRADE_MAP.get(str(lic.get("classification") or "").upper())
+        if t and t != "general":
+            return _NAME_TRADE_TO_SUB.get(t, t if t in SUB_TRADES else "other")
+    return "other"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Trade roster (By trade view)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_value: float = 0,
+                now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.utcnow()
+    by_contractor: dict[str, dict[str, Any]] = {}
+    for p in projects:
+        for name in _names(p.contractor):
+            norm = normalize_name(name)
+            if not norm:
+                continue
+            e = by_contractor.setdefault(norm, {"names": set(), "permits": []})
+            e["names"].add(name)
+            e["permits"].append(p)
+
+    trade_roster: dict[str, list] = {}
+    for norm, cdata in by_contractor.items():
+        jobs = group_jobs(cdata["permits"])
+        total = sum(j.value for j in jobs)
+        if total < min_value:
+            continue
+        display_name = max(cdata["names"], key=len)
+        licenses = llr.match(norm)
+        assigned = infer_trade_from_name(display_name)
+        if not assigned:
+            for lic in licenses:
+                assigned = _LLR_TRADE_MAP.get(lic["classification"])
+                if assigned:
+                    break
+        assigned = assigned or "general"
+        if trade and assigned != trade:
+            continue
+        dates = [j.last_date for j in jobs if j.last_date]
+        trade_roster.setdefault(assigned, []).append({
+            "key": norm,
+            "name": display_name,
+            "also_known_as": sorted(cdata["names"] - {display_name}),
+            "trade": assigned,
+            "permit_count": len(cdata["permits"]),
+            "job_count": len(jobs),
+            "open_jobs": sum(1 for j in jobs if _is_open_job(j, now)),
+            "total_permit_value": total,
+            "last_permit_date": max(dates).isoformat() if dates else None,
+            "licenses": licenses,
+        })
+
+    result: dict[str, Any] = {}
+    for tid in sorted(trade_roster):
+        contractors = sorted(trade_roster[tid], key=lambda c: c["total_permit_value"], reverse=True)
+        total_value = sum(c["total_permit_value"] for c in contractors)
+        for c in contractors:
+            c["market_share_pct"] = round(c["total_permit_value"] / total_value * 100, 1) if total_value > 0 else 0.0
+        result[tid] = {
+            "label": TRADE_LABELS.get(tid, tid),
+            "total_contractors": len(contractors),
+            "total_permit_value": total_value,
+            "contractors": contractors,
+        }
     return {
-        "id": p.id,
-        "title": p.title,
-        "address": p.address,
-        "city": p.location,
-        "value": p.value,
-        "category": p.category,
-        "date": p.posted_date.isoformat() if p.posted_date else None,
-        "permit_number": p.permit_number,
-        "latitude": p.latitude,
-        "longitude": p.longitude,
-        "source_id": p.source_id,
-        "source_url": p.source_url,
+        "total_trades": len(result),
+        "total_contractors": sum(len(t["contractors"]) for t in result.values()),
+        "trades": result,
     }
+
+
+async def build_permit_trade_roster(trade: str | None = None, source: str | None = None,
+                                    min_value: float = 0) -> dict[str, Any]:
+    """Contractors grouped by trade, ranked by the value of their jobs (phase permits counted once)."""
+    async with get_session_factory()() as session:
+        conds = [Project.contractor != "", Project.contractor.is_not(None)]
+        if source:
+            conds.append(Project.source_id == source)
+        projects = (await session.execute(select(Project).where(*conds))).scalars().all()
+        llr = await load_llr_index(session)
+    return roster_from(projects, llr, trade=trade, min_value=min_value)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# One contractor's work
+# ──────────────────────────────────────────────────────────────────────────────
+
+PERMIT_SOURCES = ("charleston-permits", "north-charleston-permits", "mt-pleasant-permits")
+CONTRACTOR_PERMIT_LIMIT = 200
 
 
 def _prefilter_word(key: str) -> str:
@@ -603,23 +705,30 @@ def _prefilter_word(key: str) -> str:
     return words[0] if words else key
 
 
+async def _contractor_rows(db: AsyncSession, key: str) -> list:
+    rows = (await db.execute(
+        select(Project).where(Project.contractor.ilike(f"%{_prefilter_word(key)}%"))
+    )).scalars().all()
+    return [p for p in rows if any(normalize_name(n) == key for n in _names(p.contractor))]
+
+
 async def contractor_permits(key: str, session: AsyncSession | None = None) -> dict[str, Any]:
-    """Permits whose contractor normalizes to `key` (the roster's `key`), newest first."""
+    """A contractor's jobs (phase permits grouped), newest first, with how many are still open."""
     key = (key or "").strip().lower()
     if not key:
-        return {"key": key, "permits": [], "total_value": 0, "permit_count": 0}
+        return {"key": key, "permits": [], "total_value": 0, "permit_count": 0, "job_count": 0, "open_jobs": 0}
 
     async def run(db: AsyncSession) -> dict[str, Any]:
-        rows = (await db.execute(
-            select(Project).where(Project.contractor.ilike(f"%{_prefilter_word(key)}%"))
-        )).scalars().all()
-        mine = [p for p in rows if any(normalize_name(n) == key for n in _names(p.contractor))]
-        mine.sort(key=lambda p: p.posted_date or datetime.min, reverse=True)
+        jobs = group_jobs(await _contractor_rows(db, key))
+        jobs.sort(key=lambda j: j.last_date or datetime.min, reverse=True)
+        now = datetime.utcnow()
         return {
             "key": key,
-            "permit_count": len(mine),
-            "total_value": sum(p.value or 0 for p in mine),
-            "permits": [_permit_out(p) for p in mine[:CONTRACTOR_PERMIT_LIMIT]],
+            "permit_count": sum(len(j.permits) for j in jobs),
+            "job_count": len(jobs),
+            "open_jobs": sum(1 for j in jobs if _is_open_job(j, now)),
+            "total_value": sum(j.value for j in jobs),
+            "permits": [j.out() for j in jobs[:CONTRACTOR_PERMIT_LIMIT]],
         }
 
     if session is not None:
@@ -636,37 +745,40 @@ def _median(values: list[float]) -> float:
     return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
 
 
-def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | None,
-                        categories: set | None = None) -> list[dict[str, Any]]:
-    """General contractors on commercial permits of at least `min_value`, ranked by total value.
+# ──────────────────────────────────────────────────────────────────────────────
+# GC leaderboard
+# ──────────────────────────────────────────────────────────────────────────────
 
-    Residential permits and companies whose name says they're a specialty trade are left out.
-    """
+def _building_permits(projects: list) -> list:
+    return [p for p in projects if (p.category or "") not in NOT_BUILDING_CATEGORIES]
+
+
+def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | None,
+                        categories: set | None = None, llr: LlrIndex | None = None) -> list[dict[str, Any]]:
+    """General contractors on commercial jobs of at least `min_value`, ranked by total job value."""
+    llr = llr or LlrIndex({})
     leaders: dict[str, dict[str, Any]] = {}
-    for p in projects:
-        if (p.value or 0) < min_value or (p.category or "") in NOT_BUILDING_CATEGORIES:
+    for job in group_jobs(_building_permits(projects)):
+        if job.value < min_value:
             continue
-        if categories and (p.category or "") not in categories:
+        if since and (job.last_date is None or job.last_date < since):
             continue
-        if since and (p.posted_date is None or p.posted_date < since):
+        if categories and (job.category or "") not in categories:
             continue
-        for name in _names(p.contractor):
-            if infer_trade_from_name(name) not in (None, "general"):
-                continue
-            key = normalize_name(name)
-            if not key:
+        for key, name in job.names.items():
+            if not is_gc(name, llr.match(key)):
                 continue
             e = leaders.setdefault(key, {"key": key, "names": set(), "jobs": [], "categories": {}})
             e["names"].add(name)
-            e["jobs"].append(p)
-            cat = p.category or "other"
+            e["jobs"].append(job)
+            cat = job.category or "other"
             e["categories"][cat] = e["categories"].get(cat, 0) + 1
 
     out = []
     for e in leaders.values():
-        jobs = sorted(e["jobs"], key=lambda p: p.value or 0, reverse=True)
-        values = [p.value or 0 for p in jobs]
-        dates = [p.posted_date for p in jobs if p.posted_date]
+        jobs = sorted(e["jobs"], key=lambda j: j.value, reverse=True)
+        values = [j.value for j in jobs]
+        dates = [j.last_date for j in jobs if j.last_date]
         out.append({
             "key": e["key"],
             "name": max(e["names"], key=len),
@@ -676,7 +788,7 @@ def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | N
             "largest_value": values[0] if values else 0,
             "last_date": max(dates).isoformat() if dates else None,
             "categories": dict(sorted(e["categories"].items(), key=lambda kv: -kv[1])),
-            "top_jobs": [_permit_out(p) for p in jobs[:3]],
+            "top_jobs": [j.out() for j in jobs[:3]],
         })
     out.sort(key=lambda c: c["total_value"], reverse=True)
     return out
@@ -686,51 +798,33 @@ async def gc_leaderboard(min_value: float = 1_000_000, days: int = 730, limit: i
                          categories: list | None = None) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=days) if days else None
     async with get_session_factory()() as db:
-        conds = [Project.source_id.in_(PERMIT_SOURCES), Project.value >= min_value,
-                 Project.contractor.is_not(None), Project.contractor != ""]
+        conds = [Project.source_id.in_(PERMIT_SOURCES), Project.contractor.is_not(None), Project.contractor != ""]
         if since:
-            conds.append(Project.posted_date >= since)
+            conds.append(Project.posted_date >= since - JOB_GAP)
         projects = (await db.execute(select(Project).where(*conds))).scalars().all()
-    leaders = gc_leaderboard_from(projects, min_value=min_value, since=since, categories=set(categories or []) or None)
+        llr = await load_llr_index(db)
+    leaders = gc_leaderboard_from(projects, min_value=min_value, since=since,
+                                  categories=set(categories or []) or None, llr=llr)
     return {"min_value": min_value, "days": days, "categories": categories or [],
             "total": len(leaders), "contractors": leaders[:limit]}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Subs: trade permits on the same site as a GC's building permit
+# Subs on jobs
 # ──────────────────────────────────────────────────────────────────────────────
-# City of Charleston files electrical, plumbing, mechanical, fire and roofing work as
-# separate permits naming the trade contractor. They aren't linked to the building
-# permit, but they share its parcel, so a trade permit on the same parcel from shortly
-# before to two years after the building permit is taken as that job's sub.
+# Two signals: (1) companies other than the GC named on the job's own building permits,
+# and (2) City of Charleston trade permits (electrical, plumbing, mechanical, fire,
+# roofing) on the same parcel from 90 days before to two years after the job started.
+# Charleston is the only source that stores trade permits.
 
-TRADE_CATEGORIES = {
-    "electrical": "Electrical",
-    "plumbing": "Plumbing & gas",
-    "mechanical": "Mechanical / HVAC",
-    "fire-sprinkler": "Fire protection",
-    "roofing": "Roofing",
-    "painting": "Painting",
-}
-NOT_BUILDING_CATEGORIES = {"residential", "trade-permit", *TRADE_CATEGORIES}
 SUB_WINDOW_BEFORE = timedelta(days=90)
 SUB_WINDOW_AFTER = timedelta(days=730)
-SUB_SOURCE = "charleston-permits"   # the only source that stores trade permits
+SUB_SOURCE = "charleston-permits"
 
 
-def _site(p) -> str | None:
-    """Parcel number when the permit has one, else the street address without unit/master suffixes."""
-    raw = getattr(p, "raw_data", None) or {}
-    parcel = str(raw.get("MAIN_PARCEL_NUMBER") or "").strip().upper() if isinstance(raw, dict) else ""
-    if parcel:
-        return "P:" + parcel
-    addr = re.sub(r"\s+", " ", (getattr(p, "address", "") or "").upper()).strip()
-    addr = re.sub(r"\s+(MASTER|BLDG\b.*|BUILDING\b.*|UNIT\b.*|STE\b.*|SUITE\b.*|#.*)$", "", addr)
-    return "A:" + addr if addr else None
-
-
-def link_subs(jobs: list, trade_permits: list) -> list[tuple]:
-    """(job, trade permit, sub name) for each trade permit on a job's site inside the window."""
+def link_subs(jobs: list[Job], trade_permits: list, llr: LlrIndex | None = None) -> list[tuple]:
+    """(job, trade, sub name, date) for every sub found on each job."""
+    llr = llr or LlrIndex({})
     by_site: dict[str, list] = {}
     for t in trade_permits:
         site = _site(t)
@@ -738,60 +832,56 @@ def link_subs(jobs: list, trade_permits: list) -> list[tuple]:
             by_site.setdefault(site, []).append(t)
     links = []
     for job in jobs:
-        site = _site(job)
-        if not site or not job.posted_date:
+        gc_keys = {k for k, n in job.names.items() if is_gc(n, llr.match(k))}
+        for key, name in job.names.items():
+            if key not in gc_keys:
+                links.append((job, sub_trade(name, llr.match(key)), name, job.first_date))
+        site = _site(job.permits[0])
+        if not site or not job.first_date:
             continue
-        lo, hi = job.posted_date - SUB_WINDOW_BEFORE, job.posted_date + SUB_WINDOW_AFTER
-        job_names = {normalize_name(n) for n in _names(job.contractor)}
+        lo, hi = job.first_date - SUB_WINDOW_BEFORE, (job.last_date or job.first_date) + SUB_WINDOW_AFTER
         for t in by_site.get(site, []):
-            if not (lo <= t.posted_date <= hi):
+            if not (lo <= t.posted_date <= hi) or t.category not in TRADE_CATEGORIES:
                 continue
             for name in _names(t.contractor):
-                if normalize_name(name) not in job_names:
-                    links.append((job, t, name))
+                k = normalize_name(name)
+                if k and k not in gc_keys:
+                    links.append((job, t.category, name, t.posted_date))
     return links
 
 
-def _job_out(job) -> dict[str, Any]:
-    return {"id": job.id, "address": job.address, "value": job.value,
-            "date": job.posted_date.isoformat() if job.posted_date else None,
-            "gc": max(_names(job.contractor), key=len) if _names(job.contractor) else ""}
-
-
-def aggregate_subs(links: list[tuple], per_trade: int = 15) -> dict[str, Any]:
+def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: int = 15) -> dict[str, Any]:
     """Group linked subs by trade, ranked by how many distinct jobs they worked."""
+    llr = llr or LlrIndex({})
     trades: dict[str, dict[str, dict]] = {}
-    for job, t, name in links:
-        trade = t.category if t.category in TRADE_CATEGORIES else None
-        if not trade:
-            continue
+    for job, trade, name, when in links:
         key = normalize_name(name)
-        if not key:
+        if not key or trade not in SUB_TRADES:
             continue
         e = trades.setdefault(trade, {}).setdefault(key, {
             "key": key, "names": set(), "jobs": {}, "gcs": set(), "last_date": None})
         e["names"].add(name)
         e["jobs"][job.id] = job
-        e["gcs"].update(n for n in _names(job.contractor))
-        if t.posted_date and (e["last_date"] is None or t.posted_date > e["last_date"]):
-            e["last_date"] = t.posted_date
+        e["gcs"].update(n for k, n in job.names.items() if is_gc(n, llr.match(k)))
+        if when and (e["last_date"] is None or when > e["last_date"]):
+            e["last_date"] = when
     out = {}
     for trade, subs in trades.items():
         rows = []
         for e in subs.values():
-            jobs = sorted(e["jobs"].values(), key=lambda j: j.value or 0, reverse=True)
+            jobs = sorted(e["jobs"].values(), key=lambda j: j.value, reverse=True)
             rows.append({
                 "key": e["key"],
                 "name": max(e["names"], key=len),
                 "job_count": len(jobs),
-                "job_value": sum(j.value or 0 for j in jobs),
-                "gcs": sorted(e["gcs"])[:6],
+                "job_value": sum(j.value for j in jobs),
+                "gcs": sorted(e["gcs"] - e["names"])[:6],
                 "last_date": e["last_date"].isoformat() if e["last_date"] else None,
-                "jobs": [_job_out(j) for j in jobs[:5]],
+                "jobs": [j.out() for j in jobs[:5]],
             })
         rows.sort(key=lambda r: (r["job_count"], r["job_value"]), reverse=True)
-        out[trade] = {"label": TRADE_CATEGORIES[trade], "subs": rows[:per_trade], "total": len(rows)}
-    order = list(TRADE_CATEGORIES)
+        out[trade] = {"label": SUB_TRADES[trade], "subs": rows[:per_trade], "total": len(rows)}
+    order = list(SUB_TRADES)
     return dict(sorted(out.items(), key=lambda kv: order.index(kv[0])))
 
 
@@ -804,29 +894,29 @@ async def _trade_permits(db: AsyncSession, since: datetime | None) -> list:
 
 
 async def subs_for_gc(key: str) -> dict[str, Any]:
-    """The trade contractors who've worked on this GC's City of Charleston jobs."""
+    """The subs who've worked on this GC's jobs."""
     key = (key or "").strip().lower()
     async with get_session_factory()() as db:
-        rows = (await db.execute(select(Project).where(
-            Project.source_id == SUB_SOURCE, Project.contractor.ilike(f"%{_prefilter_word(key)}%"),
-        ))).scalars().all()
-        jobs = [p for p in rows if (p.category or "") not in NOT_BUILDING_CATEGORIES
-                and any(normalize_name(n) == key for n in _names(p.contractor))]
-        dates = [j.posted_date for j in jobs if j.posted_date]
+        jobs = group_jobs(_building_permits(await _contractor_rows(db, key)))
+        dates = [j.first_date for j in jobs if j.first_date]
         trade = await _trade_permits(db, min(dates) - SUB_WINDOW_BEFORE) if dates else []
-    return {"key": key, "jobs_checked": len(jobs), "trades": aggregate_subs(link_subs(jobs, trade))}
+        llr = await load_llr_index(db)
+    links = [l for l in link_subs(jobs, trade, llr) if normalize_name(l[2]) != key]
+    return {"key": key, "jobs_checked": len(jobs), "trades": aggregate_subs(links, llr)}
 
 
-async def proven_subs(min_value: float = 5_000_000, days: int = 1825) -> dict[str, Any]:
-    """Trade contractors on commercial City of Charleston jobs of at least `min_value`."""
+async def proven_subs(min_value: float = 5_000_000, days: int = 1825, categories: list | None = None) -> dict[str, Any]:
+    """Subs on commercial jobs of at least `min_value` (optionally of given building types)."""
     since = datetime.utcnow() - timedelta(days=days) if days else None
     async with get_session_factory()() as db:
-        conds = [Project.source_id == SUB_SOURCE, Project.value >= min_value,
-                 Project.category.not_in(list(NOT_BUILDING_CATEGORIES)),
+        conds = [Project.source_id.in_(PERMIT_SOURCES), Project.category.not_in(list(NOT_BUILDING_CATEGORIES)),
                  Project.contractor.is_not(None), Project.contractor != ""]
         if since:
-            conds.append(Project.posted_date >= since)
-        jobs = (await db.execute(select(Project).where(*conds))).scalars().all()
+            conds.append(Project.posted_date >= since - JOB_GAP)
+        jobs = [j for j in group_jobs((await db.execute(select(Project).where(*conds))).scalars().all())
+                if j.value >= min_value and (not since or (j.last_date and j.last_date >= since))
+                and (not categories or (j.category or "") in categories)]
         trade = await _trade_permits(db, (since - SUB_WINDOW_BEFORE) if since else None)
+        llr = await load_llr_index(db)
     return {"min_value": min_value, "days": days, "jobs_checked": len(jobs),
-            "trades": aggregate_subs(link_subs(jobs, trade))}
+            "trades": aggregate_subs(link_subs(jobs, trade, llr), llr)}

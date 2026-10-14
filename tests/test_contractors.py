@@ -145,3 +145,10 @@ def test_roster_puts_fire_and_controls_companies_in_their_trades():
     out = cm.roster_from(projects, cm.LlrIndex({}), now=NOW)
     assert "general" not in out["trades"]
     assert out["trades"]["fire-protection"]["contractors"][0]["name"] == "VSC Fire & Security"
+
+
+def test_architects_and_wall_contractors_are_never_the_gc():
+    job = _p("LS3P ASSOCIATES, LTD | GS MSE, LLC | Makson, Inc", 95e6, "multi-family", parcel="M1")
+    out = cm.gc_leaderboard_from([job], min_value=1e6, since=None, llr=cm.LlrIndex({}))
+    assert [c["name"] for c in out] == ["Makson, Inc"]
+    assert cm.is_gc("ARCO Design/Build", [])

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -530,6 +530,7 @@ async def build_permit_trade_roster(
                 trade_roster[assigned_trade] = []
 
             trade_roster[assigned_trade].append({
+                "key": norm,
                 "name": display_name,
                 "also_known_as": sorted(cdata["original_names"] - {display_name}),
                 "trade": assigned_trade,
@@ -565,3 +566,126 @@ async def build_permit_trade_roster(
             ),
             "trades": result,
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# One contractor's permits, and the GC leaderboard
+# ──────────────────────────────────────────────────────────────────────────────
+
+PERMIT_SOURCES = ("charleston-permits", "north-charleston-permits", "mt-pleasant-permits")
+CONTRACTOR_PERMIT_LIMIT = 200
+
+
+def _names(contractor_field: str | None) -> list[str]:
+    return [n.strip() for n in (contractor_field or "").split("|") if n.strip()]
+
+
+def _permit_out(p: Project) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "title": p.title,
+        "address": p.address,
+        "city": p.location,
+        "value": p.value,
+        "category": p.category,
+        "date": p.posted_date.isoformat() if p.posted_date else None,
+        "permit_number": p.permit_number,
+        "latitude": p.latitude,
+        "longitude": p.longitude,
+        "source_id": p.source_id,
+        "source_url": p.source_url,
+    }
+
+
+def _prefilter_word(key: str) -> str:
+    """The longest word of a normalized name, for a cheap SQL ILIKE before exact matching."""
+    words = sorted(key.split(), key=len, reverse=True)
+    return words[0] if words else key
+
+
+async def contractor_permits(key: str, session: AsyncSession | None = None) -> dict[str, Any]:
+    """Permits whose contractor normalizes to `key` (the roster's `key`), newest first."""
+    key = (key or "").strip().lower()
+    if not key:
+        return {"key": key, "permits": [], "total_value": 0, "permit_count": 0}
+
+    async def run(db: AsyncSession) -> dict[str, Any]:
+        rows = (await db.execute(
+            select(Project).where(Project.contractor.ilike(f"%{_prefilter_word(key)}%"))
+        )).scalars().all()
+        mine = [p for p in rows if any(normalize_name(n) == key for n in _names(p.contractor))]
+        mine.sort(key=lambda p: p.posted_date or datetime.min, reverse=True)
+        return {
+            "key": key,
+            "permit_count": len(mine),
+            "total_value": sum(p.value or 0 for p in mine),
+            "permits": [_permit_out(p) for p in mine[:CONTRACTOR_PERMIT_LIMIT]],
+        }
+
+    if session is not None:
+        return await run(session)
+    async with get_session_factory()() as db:
+        return await run(db)
+
+
+def _median(values: list[float]) -> float:
+    v = sorted(values)
+    if not v:
+        return 0.0
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
+
+
+def gc_leaderboard_from(projects: list, *, min_value: float, since: datetime | None) -> list[dict[str, Any]]:
+    """General contractors on commercial permits of at least `min_value`, ranked by total value.
+
+    Residential permits and companies whose name says they're a specialty trade are left out.
+    """
+    leaders: dict[str, dict[str, Any]] = {}
+    for p in projects:
+        if (p.value or 0) < min_value or (p.category or "") == "residential":
+            continue
+        if since and (p.posted_date is None or p.posted_date < since):
+            continue
+        for name in _names(p.contractor):
+            if infer_trade_from_name(name) not in (None, "general"):
+                continue
+            key = normalize_name(name)
+            if not key:
+                continue
+            e = leaders.setdefault(key, {"key": key, "names": set(), "jobs": [], "categories": {}})
+            e["names"].add(name)
+            e["jobs"].append(p)
+            cat = p.category or "other"
+            e["categories"][cat] = e["categories"].get(cat, 0) + 1
+
+    out = []
+    for e in leaders.values():
+        jobs = sorted(e["jobs"], key=lambda p: p.value or 0, reverse=True)
+        values = [p.value or 0 for p in jobs]
+        dates = [p.posted_date for p in jobs if p.posted_date]
+        out.append({
+            "key": e["key"],
+            "name": max(e["names"], key=len),
+            "job_count": len(jobs),
+            "total_value": sum(values),
+            "median_value": _median(values),
+            "largest_value": values[0] if values else 0,
+            "last_date": max(dates).isoformat() if dates else None,
+            "categories": dict(sorted(e["categories"].items(), key=lambda kv: -kv[1])),
+            "top_jobs": [_permit_out(p) for p in jobs[:3]],
+        })
+    out.sort(key=lambda c: c["total_value"], reverse=True)
+    return out
+
+
+async def gc_leaderboard(min_value: float = 1_000_000, days: int = 730, limit: int = 50) -> dict[str, Any]:
+    since = datetime.utcnow() - timedelta(days=days) if days else None
+    async with get_session_factory()() as db:
+        conds = [Project.source_id.in_(PERMIT_SOURCES), Project.value >= min_value,
+                 Project.contractor.is_not(None), Project.contractor != ""]
+        if since:
+            conds.append(Project.posted_date >= since)
+        projects = (await db.execute(select(Project).where(*conds))).scalars().all()
+    leaders = gc_leaderboard_from(projects, min_value=min_value, since=since)
+    return {"min_value": min_value, "days": days, "total": len(leaders), "contractors": leaders[:limit]}

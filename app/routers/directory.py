@@ -124,6 +124,30 @@ async def list_trades(
     return await build_permit_trade_roster(trade=trade, source=source, min_value=min_value)
 
 
+@router.get("/trades/contractor")
+async def contractor_permit_list(
+    key: str = Query(..., description="Contractor key from the /directory/trades roster"),
+    _user=Depends(get_current_user),
+):
+    """One contractor's permits (newest first), for the Contractors tab detail view."""
+    from app.services.contractor_match import contractor_permits
+
+    return await contractor_permits(key)
+
+
+@router.get("/gc-leaders")
+async def gc_leaders(
+    min_value: float = Query(1_000_000, ge=0, description="Smallest permit value that counts"),
+    days: int = Query(730, ge=0, le=3650, description="Look-back window in days (0 = all time)"),
+    limit: int = Query(50, ge=1, le=200),
+    _user=Depends(get_current_user),
+):
+    """General contractors winning commercial permits of at least `min_value`, ranked by total value."""
+    from app.services.contractor_match import gc_leaderboard
+
+    return await gc_leaderboard(min_value=min_value, days=days, limit=limit)
+
+
 @router.get("/trades/list")
 async def available_trades(
     _user=Depends(get_current_user),

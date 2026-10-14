@@ -165,12 +165,14 @@ async def contractor_subs(
 async def subs_on_big_jobs(
     min_value: float = Query(5_000_000, ge=0, description="Smallest building permit that counts"),
     days: int = Query(1825, ge=0, le=3650, description="Look-back window in days (0 = all time)"),
+    categories: str = Query("", description="Comma-separated permit categories, e.g. education,institutional"),
     _user=Depends(get_current_user),
 ):
-    """Trade contractors proven on large commercial City of Charleston jobs, by trade."""
+    """Subs proven on large commercial jobs, by trade."""
     from app.services.contractor_match import proven_subs
 
-    return await proven_subs(min_value=min_value, days=days)
+    cats = [c.strip() for c in categories.split(",") if c.strip()]
+    return await proven_subs(min_value=min_value, days=days, categories=cats)
 
 
 @router.get("/trades/list")

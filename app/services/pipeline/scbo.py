@@ -203,9 +203,22 @@ def is_charleston_area(ad: dict) -> bool:
     agency = ad.get("Agency/Owner", "")
     if CHARLESTON_AGENCIES_RE.search(agency):
         return True
-    hay = " ".join([ad.get("Project Location", ""), agency, ad.get("Project Name", ""),
-                    ad.get("Description", "")])
-    return bool(CHARLESTON_PLACES_RE.search(hay))
+    location = _strip_street_names(ad.get("Project Location", ""))
+    if location.strip():
+        # A stated location decides it: an Aiken job on "Charleston Hwy" isn't ours.
+        return bool(CHARLESTON_PLACES_RE.search(location))
+    hay = " ".join([agency, ad.get("Project Name", ""), ad.get("Description", "")])
+    return bool(CHARLESTON_PLACES_RE.search(_strip_street_names(hay)))
+
+
+STREET_NAME_RE = re.compile(
+    r"\bcharleston\s+(?:st|street|ave|avenue|rd|road|hwy|highway|blvd|boulevard|dr|drive|ln|lane|way|pike)\b\.?",
+    re.IGNORECASE,
+)
+
+
+def _strip_street_names(text: str) -> str:
+    return STREET_NAME_RE.sub(" ", text or "")
 
 
 def _construction_stage(delivery: str, ad: dict) -> str:

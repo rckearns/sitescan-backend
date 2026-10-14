@@ -188,14 +188,19 @@ async def discover_sfaa_documents(client: httpx.AsyncClient, years: Iterable[int
     seen = set()
     for year in sorted(set(years), reverse=True):
         try:
-            try:
-                resp = await client.post(
-                    SFAA_INDEX_URL, data={"mtgsel": str(year)}, headers={"User-Agent": USER_AGENT},
-                    timeout=DIRECT_TIMEOUT,
-                )
-                resp.raise_for_status()
-            except (httpx.TimeoutException, httpx.ConnectError):
-                # sfaa.sc.gov doesn't answer Railway's IP; go through the proxy.
+            resp = None
+            for _ in range(2):   # the site answers in under a second, or sometimes not at all
+                try:
+                    resp = await client.post(
+                        SFAA_INDEX_URL, data={"mtgsel": str(year)}, headers={"User-Agent": USER_AGENT},
+                        timeout=DIRECT_TIMEOUT,
+                    )
+                    resp.raise_for_status()
+                    break
+                except (httpx.TimeoutException, httpx.ConnectError):
+                    resp = None
+            if resp is None:
+                # sfaa.sc.gov doesn't answer Railway's IP at times; go through the proxy.
                 resp = await proxied(client, "POST", SFAA_INDEX_URL, data={"mtgsel": str(year)})
         except httpx.HTTPError as exc:
             logger.warning("sfaa: meetings page for %s failed: %s", year, exc)

@@ -84,6 +84,8 @@ COUNTY_OUT_FIELDS = ",".join([
 COUNTY_PAGE_SIZE = 1000   # the service's maxRecordCount
 COUNTY_MAX_PAGES = 30     # safety stop (~4.4k rows today)
 COUNTY_CACHE_SECONDS = 6 * 3600
+# Common-area, marsh and HOA scraps carry token land values ($200); they aren't sites.
+MIN_LAND_VALUE = 10_000
 
 _county_cache: dict[str, Any] = {"at": 0.0, "features": None}
 _county_lock = asyncio.Lock()
@@ -92,7 +94,7 @@ _county_lock = asyncio.Lock()
 def county_where_clause() -> str:
     """Commercial / vacant-commercial parcels whose buildings are worth less than the land."""
     codes = " OR ".join(f"{_C}CLASS_CODE LIKE '{c}%'" for c in COUNTY_CLASS_LABELS)
-    return f"({codes}) AND {_C}LAND_APPR > 0 AND {_C}IMP_APPR < {_C}LAND_APPR"
+    return f"({codes}) AND {_C}LAND_APPR >= {MIN_LAND_VALUE} AND {_C}IMP_APPR < {_C}LAND_APPR"
 
 
 def _clean(v: Any) -> str:
@@ -106,12 +108,13 @@ _CITY_ALIASES = {
     "northcharlesotn": "North Charleston", "northchas": "North Charleston",
     "mtpleasant": "Mount Pleasant", "mountpl": "Mount Pleasant", "mtpl": "Mount Pleasant",
     "mcclellanville": "McClellanville", "holllywood": "Hollywood",
+    "chas": "Charleston", "nchas": "North Charleston",
 }
 
 
 def _normalize_city(v: Any) -> str:
     city = re.sub(r"\s+(sc|s\.c\.)?\s*\d{5}(-\d{4})?$|\s+sc$", "", _clean(v), flags=re.I)
-    city = city.title()
+    city = re.sub(r"(?<=\s)(Of|The)\b", lambda m: m.group(1).lower(), city.title())   # Isle of Palms
     key = re.sub(r"[^a-z]", "", city.lower())
     return _CITY_ALIASES.get(key, re.sub(r"^Mt\.? ", "Mount ", city))
 
@@ -138,6 +141,7 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
         return None
     code = _clean(a.get(_C + "CLASS_CODE"))[:3]
     house = _clean(a.get(_C + "PROP_ST_NO"))
+    street = _clean(a.get(_C + "PROP_ST_NAME"))
     land = a.get(_C + "LAND_APPR") or 0
     imp = a.get(_C + "IMP_APPR") or 0
     return {
@@ -148,7 +152,7 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
             "PARCELID": tms,
             "OWNER": _clean(a.get(_C + "OWNER1")),
             "HOUSE": "" if house in ("", "0") else house,
-            "STREET": _clean(a.get(_C + "PROP_ST_NAME")),
+            "STREET": "" if re.fullmatch(r"0*", street) else street,
             "CITY": _normalize_city(a.get(_C + "PROP_CITY")),
             "CLASS_CODE": code,
             "GENUSE": COUNTY_CLASS_LABELS.get(code, "Commercial"),
@@ -163,7 +167,8 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
     }
 
 
-COUNTY_DIRECT_TIMEOUT = 20.0   # seconds; the county stopped answering Railway's IP at times
+COUNTY_DIRECT_TIMEOUT = 30.0   # seconds; the county stopped answering Railway's IP at times
+COUNTY_DIRECT_ATTEMPTS = 3     # single pages sometimes take 30s+; retry before giving up
 COUNTY_PROXY_TIMEOUT = 90.0
 
 
@@ -184,16 +189,21 @@ async def _county_page(client: httpx.AsyncClient, params: dict, state: dict) -> 
     (timeout / connection refused), retry through the ZenRows proxy and keep
     using it for the rest of this fetch."""
     if not state.get("proxy"):
-        try:
-            resp = await client.get(COUNTY_PARCELS_URL, params=params, timeout=COUNTY_DIRECT_TIMEOUT)
-            resp.raise_for_status()
-            return resp.json()
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
-            key = _zenrows_key()
-            if not key:
-                raise
-            logger.warning(f"County parcel service unreachable directly ({type(exc).__name__}); using proxy")
-            state["proxy"] = key
+        for attempt in range(1, COUNTY_DIRECT_ATTEMPTS + 1):
+            try:
+                resp = await client.get(COUNTY_PARCELS_URL, params=params, timeout=COUNTY_DIRECT_TIMEOUT)
+                resp.raise_for_status()
+                return resp.json()
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if attempt < COUNTY_DIRECT_ATTEMPTS:
+                    logger.info(f"County parcel page attempt {attempt} failed ({type(exc).__name__}); retrying")
+                    await asyncio.sleep(2 * attempt)
+                    continue
+                key = _zenrows_key()
+                if not key:
+                    raise
+                logger.warning(f"County parcel service unreachable directly ({type(exc).__name__}); using proxy")
+                state["proxy"] = key
     from app.services.proxy import proxied
     target = str(httpx.URL(COUNTY_PARCELS_URL, params=params))
     resp = await proxied(client, "GET", target, timeout=COUNTY_PROXY_TIMEOUT)
@@ -232,12 +242,33 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
             await client.aclose()
     if state.get("proxy"):
         logger.info(f"County parcels fetched through proxy: {len(features)}")
-    return features
+    return merge_parcel_pieces(features)
 
 
-# v2: features carry CONSTRUCTION (recent new-construction permits); bumping the key
-# makes the first request after deploy rebuild the saved copy with those flags.
-HOME_PAYLOAD_KEY = "home-parcels:charleston-county:v2"
+def merge_parcel_pieces(features: list[dict]) -> list[dict]:
+    """One feature per TMS. A parcel drawn as several polygons comes back once per
+    piece, each repeating the full appraisal; keep the largest piece's location and
+    add up the acreage."""
+    merged: dict = {}
+    for f in features:
+        p = f["properties"]
+        tms = p["TMS"]
+        if tms not in merged:
+            merged[tms] = {**f, "properties": dict(p)}
+            continue
+        keep = merged[tms]["properties"]
+        acres_keep, acres_new = keep.get("GISACRES") or 0, p.get("GISACRES") or 0
+        if acres_new > acres_keep:
+            merged[tms] = {**f, "properties": {**p}}
+            keep = merged[tms]["properties"]
+        keep["GISACRES"] = (acres_keep + acres_new) or None
+    return list(merged.values())
+
+
+# v2: features carry CONSTRUCTION (recent new-construction permits).
+# v3: multi-piece parcels merged, token-value lots dropped, stricter construction flags.
+# Bumping the key makes the first request after deploy rebuild the saved copy.
+HOME_PAYLOAD_KEY = "home-parcels:charleston-county:v3"
 
 
 async def _load_saved_features() -> tuple:

@@ -127,8 +127,11 @@ async def scan_sam_gov(api_key="", state="SC", keywords=None, days_back=30):
                     "source_url": f"https://sam.gov/opp/{opp.get('noticeId','')}/view",
                     "raw_data": opp,
                 })
+        except httpx.HTTPStatusError as e:
+            # The exception text includes the request URL, which carries the api_key.
+            logger.error(f"SAM.gov error: HTTP {e.response.status_code}")
         except Exception as e:
-            logger.error(f"SAM.gov error: {e}")
+            logger.error(f"SAM.gov error: {type(e).__name__}")
 
     seen = set()
     return [r for r in results if r["external_id"] not in seen and not seen.add(r["external_id"])]

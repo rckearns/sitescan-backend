@@ -19,7 +19,14 @@ NEW_CONSTRUCTION_URL = (
     "https://gis.charleston-sc.gov/arcgis2/rest/services/External/Applications/MapServer/21/query"
 )
 LOOKBACK_YEARS = 5          # covers the assessor's reassessment lag
-MIN_VALUATION = 100_000     # skip trivial items; mock-up panels etc. still count if valued
+MIN_VALUATION = 100_000     # skip trivial items
+STALE_YEARS = 3             # an "Issued" permit this old with no final is treated as abandoned
+# "New" permits that aren't a new building: facade mock-ups, interior fit-outs, walls, signs.
+NOT_A_BUILDING_RE = re.compile(
+    r"mock[\s-]*up|sample\s+panel|up[\s-]*fit|tenant\s+improvement|interior\s+(?:build|finish|renovation)|"
+    r"\bsign(?:age)?\b|retaining\s+wall|trip\s+wall|sea\s*wall|\bfence\b|\bdock\b|\bpool\b|\btank\b",
+    re.IGNORECASE,
+)
 PAGE_SIZE = 5000
 FIELDS = "MAIN_PARCEL_NUMBER,PERMIT_NUMBER,WORK_CLASS,PERMIT_STATUS,ISSUE_DATE,FINALED_DATE,VALUATION,DESCRIPTION"
 
@@ -37,6 +44,15 @@ def _year(v) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _counts(a: dict, this_year: int) -> bool:
+    """Whether a permit means a new building on the parcel (not a mock-up, fit-out or stale permit)."""
+    if NOT_A_BUILDING_RE.search(str(a.get("DESCRIPTION") or "")):
+        return False
+    status = str(a.get("PERMIT_STATUS") or "").strip().lower()
+    issued = _year(a.get("ISSUE_DATE"))
+    return not (status != "completed" and issued and issued < this_year - STALE_YEARS)
+
+
 def _summary(a: dict) -> dict:
     return {
         "status": "completed" if str(a.get("PERMIT_STATUS") or "").strip().lower() == "completed" else "underway",
@@ -51,7 +67,8 @@ def _summary(a: dict) -> dict:
 async def fetch_recent_construction(client: Optional[httpx.AsyncClient] = None,
                                     since_year: Optional[int] = None) -> dict:
     """{TMS: summary of the largest new-construction permit since `since_year`}."""
-    since_year = since_year or date.today().year - LOOKBACK_YEARS
+    this_year = date.today().year
+    since_year = since_year or this_year - LOOKBACK_YEARS
     own = client is None
     client = client or httpx.AsyncClient(timeout=60.0)
     best: dict = {}
@@ -69,6 +86,8 @@ async def fetch_recent_construction(client: Optional[httpx.AsyncClient] = None,
                 raise httpx.HTTPError(f"Permit layer error: {data['error']}")
             rows = [f.get("attributes") or {} for f in data.get("features") or []]
             for a in rows:
+                if not _counts(a, this_year):
+                    continue
                 pid = str(a.get("MAIN_PARCEL_NUMBER") or "").strip().upper()
                 tms = pid[1:] if pid.startswith("C") else pid
                 if tms and (tms not in best or (a.get("VALUATION") or 0) > best[tms].get("VALUATION", 0)):

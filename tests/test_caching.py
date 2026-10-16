@@ -214,7 +214,8 @@ def test_county_falls_back_to_proxy_when_direct_times_out(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     assert run(parcels.fetch_county_parcel_features(client)) == []
     county = "gisccapps.charlestoncounty.org"
-    assert seen == [county] * parcels.COUNTY_DIRECT_ATTEMPTS + ["api.zenrows.com"]
+    # Main list (direct attempts, then proxy) and the exempt-lot query (proxy, already switched).
+    assert seen == [county] * parcels.COUNTY_DIRECT_ATTEMPTS + ["api.zenrows.com", "api.zenrows.com"]
 
 
 async def _no_sleep(_):
@@ -233,7 +234,7 @@ def test_county_retries_a_slow_page_directly(monkeypatch):
     monkeypatch.setattr(parcels, "_zenrows_key", lambda: "")
     monkeypatch.setattr(parcels.asyncio, "sleep", _no_sleep)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    assert run(parcels.fetch_county_parcel_features(client)) == [] and len(calls) == 2
+    assert run(parcels.fetch_county_parcel_features(client)) == [] and len(calls) == 3   # retry + exempt query
 
 
 def test_county_timeout_without_proxy_key_raises(monkeypatch):

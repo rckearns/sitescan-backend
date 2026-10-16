@@ -33,7 +33,22 @@ logger = logging.getLogger("sitescan.parcel_analysis")
 # v3: the model supplies assumptions only (GSF, $/SF, soft %, NOI, cap rate) and
 #     zoning fit; cost, value, profit on cost and the recommendation are computed
 #     here. Prompt includes City zoning, height district and overlays.
-ANALYSIS_VERSION = 3
+# v4: scenarios can be for-sale ("exit": "sell": saleable SF x sale price) as well as
+#     hold (NOI / cap rate); the pro forma adds construction financing and land carry
+#     during approvals, and reports break-even values. v3 analyses are still served,
+#     recomputed with financing, until regenerated.
+ANALYSIS_VERSION = 4
+SERVABLE_VERSIONS = (3, 4)
+
+# Financing assumptions applied in code (the model doesn't pick these).
+FINANCING = {
+    "interest_rate": 0.075,     # construction loan rate
+    "loan_to_cost": 0.65,
+    "loan_fee_pct": 0.01,
+    "avg_draw": 0.55,           # average share of the loan outstanding while building
+}
+ENTITLEMENT_MONTHS = {"by_right": 6, "needs_approval": 15, "not_allowed": 24}
+DEFAULT_SELLING_COST = 0.06
 DEFAULT_MODEL = "claude-sonnet-5-5"
 # Thinking (on by default for Sonnet 5.5) counts toward max_tokens; leave room for it
 # plus the JSON answer. 16k is the recommended ceiling for non-streaming requests.
@@ -73,14 +88,20 @@ Respond with valid JSON matching exactly this structure:
       "zoning_fit": "by_right | needs_approval | not_allowed",
       "zoning_notes": "One sentence: what the zoning allows for this scenario and what approvals it needs",
       "assumptions": {
+        "exit": "hold | sell",
         "gross_sf": 0,
         "units": 0,
-        "unit_label": "keys | units | null",
+        "unit_label": "keys | units | homes | null",
         "hard_cost_psf": 0,
         "soft_cost_pct": 0.0,
+        "build_months": 0,
         "stabilized_noi": 0,
-        "noi_basis": "One line showing how NOI was derived, e.g. 70 keys x $285 ADR x 78% occ x 365 = $5.7M rooms rev; 32% NOI margin",
-        "cap_rate": 0.0
+        "noi_basis": "hold only: one line showing how NOI was derived, e.g. 70 keys x $285 ADR x 78% occ x 365 = $5.7M rooms rev; 32% NOI margin",
+        "cap_rate": 0.0,
+        "saleable_sf": 0,
+        "sale_price_psf": 0,
+        "selling_cost_pct": 0.06,
+        "sale_basis": "sell only: one line on the price, e.g. 6 townhomes x 3,000 SF at $1,050/SF, per recent Ansonborough sales"
       }
     }
   ],
@@ -91,11 +112,19 @@ Rules:
   Size gross_sf to what the lot and height limit can realistically hold. Mark zoning_fit honestly.
 - hard_cost_psf: current construction cost per gross SF for this building type in Charleston,
   including structured parking if the scenario needs it.
+- exit: "hold" for income property valued on NOI and a cap rate (hotels, apartments, office, retail);
+  "sell" for homes, townhomes or condos built to sell. Where zoning allows residential, include at
+  least one for-sale scenario: on the Peninsula, building to sell is often the highest and best use.
 - soft_cost_pct: soft costs as a decimal fraction of hard cost (e.g. 0.25), covering design, permits,
-  fees, financing, FF&E and pre-opening where applicable (hotels typically need more than other uses).
-- stabilized_noi: annual NOI at stabilization, consistent with noi_basis.
-- cap_rate: market exit cap rate as a percent, e.g. 7.0.
-- Use whole dollars (integers) for gross_sf, units, hard_cost_psf and stabilized_noi.
+  fees, FF&E and pre-opening where applicable. Do NOT include loan interest or loan fees: the
+  application adds construction financing and land carry itself.
+- build_months: construction duration in months.
+- hold: stabilized_noi = annual NOI at stabilization, consistent with noi_basis; cap_rate = market exit
+  cap rate as a percent, e.g. 7.0. Leave the sell fields 0.
+- sell: saleable_sf = total SF sold (net of common areas); sale_price_psf = expected average sale price
+  per saleable SF in this submarket; selling_cost_pct = commissions and closing as a fraction (about
+  0.06). Leave stabilized_noi and cap_rate 0.
+- Use whole numbers for gross_sf, units, hard_cost_psf, stabilized_noi, saleable_sf, sale_price_psf and build_months.
 - Be realistic, not optimistic: it is fine for a scenario not to pencil.
 Respond with the JSON object only."""
 
@@ -158,41 +187,114 @@ def _num(v: Any) -> Optional[float]:
     return None
 
 
-def build_proforma(assumptions: dict, land: float) -> Optional[dict]:
-    """Deterministic pro forma from the model's assumptions; None if they are unusable."""
+def _build_months(gsf: float, given: Optional[float]) -> int:
+    if given and 3 <= given <= 60:
+        return int(round(given))
+    return 12 if gsf < 15_000 else 18 if gsf < 60_000 else 24
+
+
+def build_proforma(assumptions: dict, land: float, zoning_fit: str = "by_right") -> Optional[dict]:
+    """Deterministic pro forma from the model's assumptions; None if they are unusable.
+
+    Hold: value = NOI / cap rate. Sell: net sales = saleable SF x price x (1 - selling costs).
+    Total cost = land + hard + soft + financing: interest on a construction loan
+    (loan-to-cost x cost, average draw over the build), land carry while approvals are
+    pending, and loan fees. Break-evens solve for each input that brings profit on cost
+    to PENCIL_THRESHOLD with everything else held."""
     a = assumptions or {}
     gsf, psf = _num(a.get("gross_sf")), _num(a.get("hard_cost_psf"))
-    soft_pct, noi, cap = _num(a.get("soft_cost_pct")), _num(a.get("stabilized_noi")), _num(a.get("cap_rate"))
-    if not gsf or not psf or noi is None or not cap or gsf <= 0 or psf <= 0 or cap <= 0:
+    soft_pct = _num(a.get("soft_cost_pct"))
+    exit_ = "sell" if str(a.get("exit") or "").strip().lower() == "sell" or (
+        (_num(a.get("sale_price_psf")) or 0) > 0 and not (_num(a.get("stabilized_noi")) or 0)) else "hold"
+    if not gsf or not psf or gsf <= 0 or psf <= 0:
         return None
     if soft_pct is None or soft_pct < 0:
         soft_pct = 0.0
     if soft_pct > 1:           # model gave a percent (25) instead of a fraction (0.25)
         soft_pct /= 100
-    if cap < 1:                # model gave a fraction (0.07) instead of a percent (7.0)
-        cap *= 100
+
+    noi = cap = sale_psf = saleable = sell_pct = None
+    if exit_ == "hold":
+        noi, cap = _num(a.get("stabilized_noi")), _num(a.get("cap_rate"))
+        if noi is None or not cap or cap <= 0:
+            return None
+        if cap < 1:            # model gave a fraction (0.07) instead of a percent (7.0)
+            cap *= 100
+    else:
+        sale_psf = _num(a.get("sale_price_psf"))
+        saleable = _num(a.get("saleable_sf")) or gsf * 0.85
+        sell_pct = _num(a.get("selling_cost_pct"))
+        sell_pct = DEFAULT_SELLING_COST if sell_pct is None or sell_pct < 0 else (sell_pct / 100 if sell_pct > 1 else sell_pct)
+        if not sale_psf or sale_psf <= 0 or saleable <= 0:
+            return None
+
+    f = FINANCING
+    build = _build_months(gsf, _num(a.get("build_months")))
+    entitle = ENTITLEMENT_MONTHS.get(zoning_fit, ENTITLEMENT_MONTHS["needs_approval"])
+    rate, ltc = f["interest_rate"], f["loan_to_cost"]
+    # Financing is linear in land and in hard+soft, which keeps the break-evens closed-form.
+    fin_build = ltc * (rate * build / 12 * f["avg_draw"] + f["loan_fee_pct"])
+    fin_land = fin_build + ltc * rate * entitle / 12
     hard = gsf * psf
     soft = hard * soft_pct
-    total = land + hard + soft
-    value = noi / (cap / 100)
+    financing = land * fin_land + (hard + soft) * fin_build
+    total = land + hard + soft + financing
+
+    if exit_ == "hold":
+        value = noi / (cap / 100)
+        gross_sales = None
+    else:
+        gross_sales = saleable * sale_psf
+        value = gross_sales * (1 - sell_pct)       # net sales proceeds
     poc = (value - total) / total if total > 0 else None
-    yoc = noi / total if total > 0 else None
+    yoc = noi / total if exit_ == "hold" and total > 0 else None
+
+    t = PENCIL_THRESHOLD
+    needed = total * (1 + t)                       # value (or net sales) that clears the threshold
+    max_land = (value / (1 + t) - (hard + soft) * (1 + fin_build)) / (1 + fin_land)
+    max_hard_psf = (value / (1 + t) - land * (1 + fin_land)) / ((1 + fin_build) * (1 + soft_pct) * gsf)
+    rate_step = 0.01                               # +1 point on the construction loan rate
+    extra = ltc * rate_step * ((hard + soft) * build / 12 * f["avg_draw"] + land * (build / 12 * f["avg_draw"] + entitle / 12))
+    poc_up = (value - total - extra) / (total + extra) if total > 0 else None
+    breakeven = {
+        "max_land_cost": int(round(max_land, -3)) if max_land > 0 else None,
+        "max_hard_cost_psf": int(round(max_hard_psf)) if max_hard_psf > 0 else None,
+        "rate_plus_1pt_profit_on_cost": round(poc_up, 4) if poc_up is not None else None,
+    }
+    if exit_ == "hold":
+        breakeven["stabilized_noi"] = int(round(needed * cap / 100, -3))
+        breakeven["noi_change_pct"] = round((needed * cap / 100) / noi - 1, 4) if noi else None
+        breakeven["exit_cap_rate"] = round(noi / needed * 100, 2) if needed else None
+    else:
+        breakeven["sale_price_psf"] = int(round(needed / ((1 - sell_pct) * saleable)))
+        breakeven["sale_price_change_pct"] = round(breakeven["sale_price_psf"] / sale_psf - 1, 4)
+
     return {
+        "exit": exit_,
         "land_cost": int(round(land)),
         "estimated_hard_cost": int(round(hard)),
         "soft_costs": int(round(soft)),
+        "financing_cost": int(round(financing)),
         "total_development_cost": int(round(total)),
-        "stabilized_noi": int(round(noi)),
-        "cap_rate": round(cap, 2),
+        "stabilized_noi": int(round(noi)) if noi is not None else None,
+        "cap_rate": round(cap, 2) if cap is not None else None,
+        "gross_sales": int(round(gross_sales)) if gross_sales is not None else None,
+        "sale_price_psf": int(round(sale_psf)) if sale_psf else None,
+        "saleable_sf": int(round(saleable)) if saleable else None,
+        "selling_cost_pct": round(sell_pct, 3) if sell_pct is not None else None,
         "projected_value": int(round(value)),
+        "profit": int(round(value - total)),
         "profit_on_cost": round(poc, 4) if poc is not None else None,
         "profit_margin": f"{round(poc * 100)}%" if poc is not None else None,
         "yield_on_cost": round(yoc * 100, 2) if yoc is not None else None,
         "pencils": poc is not None and poc >= PENCIL_THRESHOLD,
+        "financing": {"interest_rate": rate, "loan_to_cost": ltc, "build_months": build, "entitlement_months": entitle},
+        "breakeven": breakeven,
     }
 
 
-def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None) -> dict:
+def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None,
+                      version: Optional[int] = None) -> dict:
     """Compute every scenario's pro forma, pick the recommendation and stamp the version.
 
     The recommended scenario is the highest profit on cost among scenarios the
@@ -206,7 +308,7 @@ def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None)
         fit = str(s.get("zoning_fit") or "").strip().lower().replace(" ", "_")
         s["zoning_fit"] = fit if fit in ZONING_FITS else "needs_approval"
         assumptions = s.get("assumptions")
-        pf = build_proforma(assumptions if isinstance(assumptions, dict) else {}, float(basis))
+        pf = build_proforma(assumptions if isinstance(assumptions, dict) else {}, float(basis), s["zoning_fit"])
         if pf is None:
             continue
         s["proforma"] = pf
@@ -223,8 +325,20 @@ def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None)
     analysis["zoning"] = zoning
     analysis["land_basis"] = int(basis)
     analysis["model"] = analysis.get("model") or model_name()
-    analysis["version"] = ANALYSIS_VERSION
+    analysis["version"] = version or ANALYSIS_VERSION
     return analysis
+
+
+def is_servable(analysis: Any) -> bool:
+    """Shown to users (v3 is recomputed with the current pro forma); see is_current."""
+    return isinstance(analysis, dict) and analysis.get("version") in SERVABLE_VERSIONS
+
+
+def refinalize(analysis: dict) -> dict:
+    """Recompute a stored analysis's pro forma with the current code (financing, break-evens)."""
+    import copy
+    a = copy.deepcopy(analysis)
+    return finalize_analysis(a, int(a.get("land_basis") or 0), a.get("zoning"), version=a.get("version"))
 
 
 def model_name() -> str:

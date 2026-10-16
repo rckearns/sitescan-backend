@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.models.database import ParcelAnalysis, User, get_db
 from app.services.parcel_analysis import (
     AnalysisError, AnalysisInvalidJSON, generate_analysis, get_analysis_row,
-    is_current, save_analysis,
+    is_servable, refinalize, save_analysis,
 )
 
 logger = logging.getLogger("sitescan.analyze")
@@ -42,20 +42,21 @@ async def cached_parcel_analyses(
     if not tms_list:
         return {"analyses": {}}
     result = await db.execute(select(ParcelAnalysis).where(ParcelAnalysis.tms.in_(tms_list)))
-    return {"analyses": {row.tms: row.analysis for row in result.scalars().all() if is_current(row.analysis)}}
+    return {"analyses": {row.tms: refinalize(row.analysis) for row in result.scalars().all() if is_servable(row.analysis)}}
 
 
 @router.post("/parcel/{tms}")
 async def analyze_parcel(
     tms: str,
     payload: ParcelPayload,
+    refresh: bool = Query(False, description="Regenerate even if a stored analysis exists"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Return cached AI analysis for a parcel, generating it if missing or stale."""
     cached = await get_analysis_row(db, tms)
-    if cached is not None and is_current(cached.analysis):
-        return {"tms": tms, "cached": True, "analysis": cached.analysis}
+    if cached is not None and is_servable(cached.analysis) and refresh is not True:
+        return {"tms": tms, "cached": True, "analysis": refinalize(cached.analysis)}
 
     settings = get_settings()
     if not settings.anthropic_api_key:
@@ -69,4 +70,4 @@ async def analyze_parcel(
         raise HTTPException(status_code=502, detail=str(e))
 
     stored = await save_analysis(db, tms, payload.parcel, analysis)
-    return {"tms": tms, "cached": stored is not analysis, "analysis": stored}
+    return {"tms": tms, "cached": stored is not analysis, "analysis": refinalize(stored)}

@@ -133,21 +133,64 @@ def test_proforma_is_computed_not_trusted():
     # 483 Meeting St as the AI first described it: 70 keys, $12.0M hard, $1.8M soft, $1.35M NOI at 7.8%.
     pf = pa.build_proforma({"gross_sf": 48_000, "hard_cost_psf": 250, "soft_cost_pct": 0.15,
                             "stabilized_noi": 1_350_000, "cap_rate": 7.8}, 3_631_600)
+    assert pf["exit"] == "hold"
     assert pf["estimated_hard_cost"] == 12_000_000 and pf["soft_costs"] == 1_800_000
-    assert pf["total_development_cost"] == 17_431_600
+    # 18-month build, 6 months of approvals by right, 65% LTC at 7.5%, 1% fee.
+    assert pf["financing"]["build_months"] == 18 and pf["financing"]["entitlement_months"] == 6
+    assert 880_000 < pf["financing_cost"] < 920_000
+    assert pf["total_development_cost"] == 3_631_600 + 12_000_000 + 1_800_000 + pf["financing_cost"]
     assert pf["projected_value"] == 17_307_692
-    assert pf["profit_margin"] == "-1%" and pf["pencils"] is False
-    assert pf["yield_on_cost"] == 7.74
+    assert pf["profit_margin"] == "-6%" and pf["pencils"] is False
 
 
 def test_proforma_unit_slips_and_bad_input():
     pf = pa.build_proforma({"gross_sf": 10_000, "hard_cost_psf": 200, "soft_cost_pct": 25,
                             "stabilized_noi": 280_000, "cap_rate": 0.07}, 500_000)
     assert pf["soft_costs"] == 500_000 and pf["cap_rate"] == 7.0      # 25 -> 0.25, 0.07 -> 7.0
-    assert pf["total_development_cost"] == 3_000_000 and pf["projected_value"] == 4_000_000
-    assert pf["profit_margin"] == "33%" and pf["pencils"] is True
+    assert pf["projected_value"] == 4_000_000 and pf["pencils"] is True
     assert pa.build_proforma({"gross_sf": 0, "hard_cost_psf": 200, "stabilized_noi": 1, "cap_rate": 7}, 1) is None
     assert pa.build_proforma({"gross_sf": "abc"}, 1) is None
+    assert pa.build_proforma({"exit": "sell", "gross_sf": 1000, "hard_cost_psf": 200}, 1) is None   # no price
+
+
+def _poc_with(assumptions, land, fit="by_right"):
+    return pa.build_proforma(assumptions, land, fit)["profit_on_cost"]
+
+
+def test_for_sale_scenario_and_its_break_evens():
+    # 18 Henrietta as six for-sale homes: 18,000 SF, 15,300 saleable at $1,000/SF, 6% selling costs.
+    a = {"exit": "sell", "gross_sf": 18_000, "hard_cost_psf": 450, "soft_cost_pct": 0.2,
+         "saleable_sf": 15_300, "sale_price_psf": 1000, "selling_cost_pct": 0.06, "build_months": 14}
+    pf = pa.build_proforma(a, 3_657_000, "by_right")
+    assert pf["exit"] == "sell" and pf["gross_sales"] == 15_300_000
+    assert pf["projected_value"] == 14_382_000 and pf["stabilized_noi"] is None
+    be = pf["breakeven"]
+    # Plugging each break-even back in lands on the 15% threshold.
+    assert abs(_poc_with({**a, "sale_price_psf": be["sale_price_psf"]}, 3_657_000) - pa.PENCIL_THRESHOLD) < 0.002
+    assert abs(_poc_with({**a, "hard_cost_psf": be["max_hard_cost_psf"]}, 3_657_000) - pa.PENCIL_THRESHOLD) < 0.003
+    if be["max_land_cost"]:
+        assert abs(_poc_with(a, be["max_land_cost"]) - pa.PENCIL_THRESHOLD) < 0.002
+    assert be["rate_plus_1pt_profit_on_cost"] < pf["profit_on_cost"]
+
+
+def test_hold_break_evens_and_approval_time_costs_money():
+    a = {"gross_sf": 40_000, "hard_cost_psf": 300, "soft_cost_pct": 0.25, "stabilized_noi": 1_500_000, "cap_rate": 7.0}
+    pf = pa.build_proforma(a, 1_000_000)
+    be = pf["breakeven"]
+    assert abs(_poc_with({**a, "stabilized_noi": be["stabilized_noi"]}, 1_000_000) - pa.PENCIL_THRESHOLD) < 0.002
+    assert abs(_poc_with({**a, "cap_rate": be["exit_cap_rate"]}, 1_000_000) - pa.PENCIL_THRESHOLD) < 0.002
+    slow = pa.build_proforma(a, 1_000_000, "needs_approval")
+    assert slow["financing_cost"] > pf["financing_cost"] and slow["financing"]["entitlement_months"] == 15
+
+
+def test_v3_analyses_are_served_recomputed():
+    a = json.loads(_ai_json())
+    stored = pa.finalize_analysis(a, 1_000_000, version=3)
+    stored["scenarios"][0]["proforma"] = {"profit_on_cost": 9.99}       # stale numbers from old code
+    assert pa.is_servable(stored) and not pa.is_current(stored)
+    out = pa.refinalize(stored)
+    assert out["version"] == 3 and "financing_cost" in out["scenarios"][0]["proforma"]
+    assert out["scenarios"][0]["proforma"]["profit_on_cost"] != 9.99
 
 
 def test_finalize_recommends_best_allowed_scenario():

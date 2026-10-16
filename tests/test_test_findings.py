@@ -64,3 +64,38 @@ def test_trc_agenda_item_fields():
     assert it.address == "1730 CLEMENTS FERRY RD" and it.tms == "2620000028" and it.acreage == 20.92
     assert it.neighborhood == "CAINHOY" and it.owner == "Capstone Collegiate Communities"
     assert it.request_text.startswith("POINT HOPE - CAPSTONE COTTAGES: Proposed construction of new multi-family")
+
+
+def test_exempt_lots_score_as_vacant_and_get_a_land_estimate():
+    def feat(tms, land, acres, lon=-79.94, lat=32.79, exempt=False):
+        props = {"TMS": tms, "LAND_APPR": land, "IMP_APPR": 0, "GISACRES": acres, "LON": lon, "LAT": lat,
+                 "GENUSE": "Parking Lot"}
+        if exempt:
+            props["EXEMPT"] = True
+        return {"type": "Feature", "geometry": None, "properties": props}
+    small = [feat(f"S{i}", v, 0.2) for i, v in enumerate([1e6, 2e6, 3e6, 4e6, 5e6])]   # $5M–25M/acre
+    mid = [feat(f"M{i}", v, 1.0) for i, v in enumerate([4e6, 5e6, 6e6, 7e6, 8e6])]      # $4M–8M/acre
+    feats = small + mid + [feat("FAR", 100_000, 1.0, lon=-80.2), feat("CH", 0, 0.5, exempt=True)]
+    parcels.estimate_exempt_land(feats)
+    church = feats[-1]["properties"]
+    assert church["LAND_EST"] == 3_000_000            # 0.5 ac is in the 0.5–1.5 band: median $6M/acre
+    assert parcels.opportunity_score(church) == 100
+    assert parcels.opportunity_score({"LAND_APPR": 0, "IMP_APPR": 0}) == 50   # not exempt: unknown
+
+    from app.services.parcel_analysis import build_prompt, land_basis
+    assert land_basis(church) == 3_000_000
+    assert "not assessed (tax-exempt owner)" in build_prompt(church)
+
+
+def test_exempt_query_targets_zero_value_lots_of_a_quarter_acre():
+    w = parcels.exempt_where_clause()
+    assert "LAND_APPR = 0" in w and "ACRES_CAL >= 0.25" in w and "'905%'" in w and "'460%'" in w
+    assert "'460%'" in parcels.county_where_clause()
+
+
+def test_not_for_sale_owners_and_size_cap():
+    assert parcels.NOT_FOR_SALE_OWNER_RE.search("UNITED STATES OF AMERICA")
+    assert parcels.NOT_FOR_SALE_OWNER_RE.search("SOUTH CAROLINA STATE PORTS AUTHORITY")
+    assert not parcels.NOT_FOR_SALE_OWNER_RE.search("CITADEL SQUARE BAPTIST CHURCH")
+    assert not parcels.NOT_FOR_SALE_OWNER_RE.search("CITY OF CHARLESTON")
+    assert "ACRES_CAL <= 3.0" in parcels.exempt_where_clause()

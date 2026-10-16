@@ -101,8 +101,10 @@ Respond with the JSON object only."""
 
 
 def land_basis(parcel: dict) -> int:
-    """Land acquisition basis: appraised land value (LAND_APPR), else total appraisal (APPRVAL)."""
-    return int(round(_js_parse_float(parcel.get("LAND_APPR")) or _js_parse_float(parcel.get("APPRVAL"))))
+    """Land acquisition basis: appraised land value (LAND_APPR), else total appraisal (APPRVAL),
+    else for a $0-assessed exempt lot the estimate from nearby assessed land (LAND_EST)."""
+    return int(round(_js_parse_float(parcel.get("LAND_APPR")) or _js_parse_float(parcel.get("APPRVAL"))
+                     or _js_parse_float(parcel.get("LAND_EST"))))
 
 
 def build_prompt(parcel: dict, zoning: Optional[dict] = None) -> str:
@@ -127,7 +129,7 @@ Address: {addr}
 TMS: {tms}{city_line}
 Current Use: {genuse}
 Owner: {owner}
-Land Value (assessor): ${land:,.0f}
+Land Value (assessor): {f"not assessed (tax-exempt owner); estimated ${land:,.0f} from assessed land nearby" if parcel.get("EXEMPT") else f"${land:,.0f}"}
 Improvements Value: ${imp:,.0f}
 Total Appraised Value: ${total:,.0f}
 Year Built: {yr}{acres_line}

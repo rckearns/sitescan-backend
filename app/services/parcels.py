@@ -74,7 +74,20 @@ COUNTY_CLASS_LABELS = {
     "500": "Commercial",
     "952": "Vacant Commercial",
     "910": "Commercial Development Acreage",
+    "460": "Parking Lot",
 }
+# Tax-exempt owners (churches, the City, foundations) carry $0 assessments, so the main
+# query can't see their land. These codes are fetched separately, on the Peninsula only.
+EXEMPT_CLASS_LABELS = {**COUNTY_CLASS_LABELS, "905": "Vacant Residential Lot"}
+EXEMPT_MIN_ACRES = 0.25
+EXEMPT_MAX_ACRES = 3.0          # larger exempt tracts are parks, marsh, port and federal land
+# Federal and state land isn't for sale; churches, the City and foundations sometimes are.
+NOT_FOR_SALE_OWNER_RE = re.compile(
+    r"UNITED STATES|\bU\s*S\s*A\b|STATE OF (SOUTH CAROLINA|SC)|STATE PORTS|"
+    r"SOUTH CAROLINA (STATE|DEPT|DEPARTMENT|DIVISION|PUBLIC|DOT)|\bSC (DEPT|DOT|STATE)\b|SCDOT",
+    re.IGNORECASE,
+)
+PENINSULA_ENVELOPE = (-79.9600, 32.7650, -79.9180, 32.8150)   # lon/lat: the Battery to the Neck
 _P = "SDE.P_POLY_PARCEL."
 _C = "SDE.CAMA."
 COUNTY_OUT_FIELDS = ",".join([
@@ -95,6 +108,13 @@ def county_where_clause() -> str:
     """Commercial / vacant-commercial parcels whose buildings are worth less than the land."""
     codes = " OR ".join(f"{_C}CLASS_CODE LIKE '{c}%'" for c in COUNTY_CLASS_LABELS)
     return f"({codes}) AND {_C}LAND_APPR >= {MIN_LAND_VALUE} AND {_C}IMP_APPR < {_C}LAND_APPR"
+
+
+def exempt_where_clause() -> str:
+    """$0-assessed parking, vacant and commercial lots of EXEMPT_MIN_ACRES or more."""
+    codes = " OR ".join(f"{_C}CLASS_CODE LIKE '{c}%'" for c in EXEMPT_CLASS_LABELS)
+    return (f"({codes}) AND {_C}LAND_APPR = 0 AND {_C}IMP_APPR = 0 "
+            f"AND {_P}ACRES_CAL >= {EXEMPT_MIN_ACRES} AND {_P}ACRES_CAL <= {EXEMPT_MAX_ACRES}")
 
 
 def _clean(v: Any) -> str:
@@ -140,6 +160,7 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
     if not tms or not center:
         return None
     code = _clean(a.get(_C + "CLASS_CODE"))[:3]
+    exempt = not (a.get(_C + "LAND_APPR") or 0) and not (a.get(_C + "IMP_APPR") or 0)
     house = _clean(a.get(_C + "PROP_ST_NO"))
     street = _clean(a.get(_C + "PROP_ST_NAME"))
     land = a.get(_C + "LAND_APPR") or 0
@@ -155,7 +176,8 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
             "STREET": "" if re.fullmatch(r"0*", street) else street,
             "CITY": _normalize_city(a.get(_C + "PROP_CITY")),
             "CLASS_CODE": code,
-            "GENUSE": COUNTY_CLASS_LABELS.get(code, "Commercial"),
+            "GENUSE": EXEMPT_CLASS_LABELS.get(code, "Commercial"),
+            **({"EXEMPT": True} if exempt else {}),
             "LAND_APPR": land,
             "IMP_APPR": imp,
             "APPRVAL": a.get(_C + "APPRAISAL") or (land + imp),
@@ -237,12 +259,70 @@ async def fetch_county_parcel_features(client: Optional[httpx.AsyncClient] = Non
             features.extend(f for f in (county_feature_to_parcel(x) for x in batch) if f)
             if len(batch) < COUNTY_PAGE_SIZE and not data.get("exceededTransferLimit"):
                 break
+        try:
+            features.extend(await _fetch_exempt_lots(client, state))
+        except Exception as exc:   # an addition to the list; never fail the whole fetch for it
+            logger.warning(f"Exempt-lot fetch failed: {type(exc).__name__}: {exc}")
     finally:
         if own:
             await client.aclose()
     if state.get("proxy"):
         logger.info(f"County parcels fetched through proxy: {len(features)}")
-    return merge_parcel_pieces(features)
+    features = merge_parcel_pieces(features)
+    estimate_exempt_land(features)
+    return features
+
+
+async def _fetch_exempt_lots(client: httpx.AsyncClient, state: dict) -> list[dict]:
+    xmin, ymin, xmax, ymax = PENINSULA_ENVELOPE
+    data = await _county_page(client, {
+        "where": exempt_where_clause(),
+        "geometry": f"{xmin},{ymin},{xmax},{ymax}",
+        "geometryType": "esriGeometryEnvelope", "inSR": "4326", "spatialRel": "esriSpatialRelIntersects",
+        "outFields": COUNTY_OUT_FIELDS, "returnGeometry": "true", "outSR": "4326",
+        "maxAllowableOffset": "0.0001", "geometryPrecision": "6",
+        "resultRecordCount": str(COUNTY_PAGE_SIZE), "f": "geojson",
+    }, state)
+    if "error" in data:
+        raise httpx.HTTPError(f"County parcel service error: {data['error']}")
+    out = [f for f in (county_feature_to_parcel(x) for x in data.get("features") or [])
+           if f and not NOT_FOR_SALE_OWNER_RE.search(f["properties"]["OWNER"])]
+    logger.info(f"Exempt Peninsula lots: {len(out)}")
+    return out
+
+
+def _in_peninsula(props: dict) -> bool:
+    xmin, ymin, xmax, ymax = PENINSULA_ENVELOPE
+    lon, lat = props.get("LON"), props.get("LAT")
+    return lon is not None and lat is not None and xmin <= lon <= xmax and ymin <= lat <= ymax
+
+
+# Land per acre falls as lots get bigger, so estimates use similar-sized lots.
+_SIZE_BANDS = ((0.0, 0.5), (0.5, 1.5), (1.5, 1e9))
+
+
+def _band(acres: float) -> int:
+    return next(i for i, (lo, hi) in enumerate(_SIZE_BANDS) if lo <= acres < hi)
+
+
+def estimate_exempt_land(features: list[dict]) -> None:
+    """Give $0-assessed lots a land estimate (LAND_EST) for ranking and the pro forma:
+    acreage × the median assessed land value per acre of similar-sized Peninsula parcels."""
+    bands: dict[int, list] = {}
+    for p in (f["properties"] for f in features):
+        acres = p.get("GISACRES") or 0
+        if not p.get("EXEMPT") and (p.get("LAND_APPR") or 0) >= MIN_LAND_VALUE and acres > 0.02 and _in_peninsula(p):
+            bands.setdefault(_band(acres), []).append(p["LAND_APPR"] / acres)
+    medians = {b: sorted(v)[len(v) // 2] for b, v in bands.items() if len(v) >= 5}
+    if not medians:
+        return
+    for f in features:
+        p = f["properties"]
+        acres = p.get("GISACRES") or 0
+        if p.get("EXEMPT") and acres:
+            b = _band(acres)
+            rate = medians.get(b) or medians[min(medians, key=lambda k: abs(k - b))]
+            p["LAND_EST"] = int(round(rate * acres, -3))
 
 
 def merge_parcel_pieces(features: list[dict]) -> list[dict]:
@@ -267,8 +347,9 @@ def merge_parcel_pieces(features: list[dict]) -> list[dict]:
 
 # v2: features carry CONSTRUCTION (recent new-construction permits).
 # v3: multi-piece parcels merged, token-value lots dropped, stricter construction flags.
+# v4: parking lots (class 460) and $0-assessed exempt lots on the Peninsula.
 # Bumping the key makes the first request after deploy rebuild the saved copy.
-HOME_PAYLOAD_KEY = "home-parcels:charleston-county:v3"
+HOME_PAYLOAD_KEY = "home-parcels:charleston-county:v4"
 
 
 async def _load_saved_features() -> tuple:
@@ -419,7 +500,7 @@ def opportunity_score(props: dict) -> int:
     land = _js_parse_float(props.get("LAND_APPR"))
     imp = _js_parse_float(props.get("IMP_APPR"))
     if land == 0 and imp == 0:
-        return 50
+        return 100 if props.get("EXEMPT") else 50   # exempt lots: nothing built, just not assessed
     if imp == 0:
         return 100   # vacant: no building at all is the most under-improved a parcel can be
     if land == 0:
@@ -439,7 +520,8 @@ def rank_parcels(features: list[dict], min_score: int = MIN_OPPORTUNITY_SCORE) -
         props = (feat or {}).get("properties") or {}
         score = opportunity_score(props)
         if score >= min_score:
-            value = _js_parse_float(props.get("LAND_APPR")) or _js_parse_float(props.get("APPRVAL"))
+            value = (_js_parse_float(props.get("LAND_APPR")) or _js_parse_float(props.get("APPRVAL"))
+                     or _js_parse_float(props.get("LAND_EST")))
             scored.append((score, value, props))
     scored.sort(key=lambda t: (-t[0], -t[1]))
     return [props for _, _, props in scored]

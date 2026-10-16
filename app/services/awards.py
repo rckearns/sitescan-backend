@@ -43,6 +43,23 @@ AGENCY_PAGES = [
 ]
 
 NOTICE_TYPES = ("award", "shortlist", "selection", "prequalified")
+_AWARDS_LOCK_KEY = 7_324_115_007   # Postgres advisory lock: one collection run at a time
+
+
+def firm_key(name: str) -> str:
+    """Normalized firm name, ignoring branch suffixes ("… - Charleston", "… of Charleston")."""
+    base = re.sub(r"\s+[-–]\s+[A-Za-z .]+$", "", name or "")
+    base = re.sub(r"\s+(of\s+)?charleston(,?\s*(inc|llc|ltd)\.?)?\s*$", "", base, flags=re.IGNORECASE)
+    return normalize_name(base) or normalize_name(name or "")
+
+
+def agency_name(raw: str) -> str:
+    """One spelling per agency ("COLLEGE OF CHARLESTON, Facility Management" -> "College of Charleston")."""
+    low = (raw or "").lower()
+    for name, _ in AGENCY_PAGES:
+        if name.lower().replace("the ", "") in low:
+            return name
+    return (raw or "").strip()
 DELIVERIES = ("design-bid-build", "cmr", "design-build", "professional", "idq", "task-order", "other")
 ROLES = ("contractor", "cm", "design-builder", "architect-engineer", "other")
 
@@ -129,7 +146,7 @@ def rows_from_extraction(data: dict, url: str, agency: str) -> list[dict]:
                 amount = None
             rows.append({
                 "source_url": url[:1000],
-                "agency": (str(n.get("agency") or "").strip() or agency)[:255],
+                "agency": agency_name(str(n.get("agency") or "").strip() or agency)[:255],
                 "form": str(n.get("form") or "").strip().upper()[:20],
                 "notice_type": kind,
                 "delivery": _choice(n.get("delivery"), DELIVERIES, "other"),
@@ -137,7 +154,7 @@ def rows_from_extraction(data: dict, url: str, agency: str) -> list[dict]:
                 "project_number": number,
                 "pip_number": normalize_pip(number),
                 "firm": name,
-                "firm_key": normalize_name(name)[:255],
+                "firm_key": firm_key(name)[:255],
                 "role": _choice(f.get("role"), ROLES, "other"),
                 "amount": amount if amount and amount > 0 else None,
                 "posted_date": _date(n.get("posting_date")),
@@ -200,6 +217,15 @@ async def run_awards_job(session_factory=None, client: Optional[Any] = None) -> 
             return summary
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     session_factory = session_factory or get_session_factory()
+    from app.services.parcel_analysis import _single_runner_lock
+    async with _single_runner_lock(session_factory, key=_AWARDS_LOCK_KEY) as got:
+        if not got:
+            logger.info("Awards job skipped: another run is in progress")
+            return {**summary, "skipped": "another run is in progress"}
+        return await _collect(summary, session_factory, client)
+
+
+async def _collect(summary: dict, session_factory, client: Any) -> dict:
     try:
         async with session_factory() as db:
             seen = set((await db.execute(select(PipelineDocument.url).where(PipelineDocument.source == DOC_SOURCE))).scalars().all())
@@ -279,7 +305,7 @@ def firm_rankings(rows: list) -> list[dict]:
     """Firms ranked by awards, then shortlists, with what they won and where."""
     firms: dict[str, dict] = {}
     for r in rows:
-        key = r.firm_key or normalize_name(r.firm)
+        key = firm_key(r.firm)
         e = firms.setdefault(key, {"key": key, "names": set(), "awards": 0, "shortlists": 0, "prequalified": 0,
                                    "awarded_value": 0.0, "agencies": set(), "roles": set(), "last_date": None, "notices": []})
         e["names"].add(r.firm)
@@ -290,7 +316,7 @@ def firm_rankings(rows: list) -> list[dict]:
             e["shortlists"] += 1
         elif r.notice_type == "prequalified":
             e["prequalified"] += 1
-        e["agencies"].add(r.agency)
+        e["agencies"].add(agency_name(r.agency))
         e["roles"].add(r.role)
         if r.posted_date and (e["last_date"] is None or r.posted_date > e["last_date"]):
             e["last_date"] = r.posted_date
@@ -310,7 +336,7 @@ def firm_rankings(rows: list) -> list[dict]:
 
 
 def award_out(r) -> dict:
-    return {"agency": r.agency, "form": r.form, "notice_type": r.notice_type, "delivery": r.delivery,
+    return {"agency": agency_name(r.agency), "form": r.form, "notice_type": r.notice_type, "delivery": r.delivery,
             "project_name": r.project_name, "project_number": r.project_number, "pip_number": r.pip_number,
             "firm": r.firm, "role": r.role, "amount": r.amount, "source_url": r.source_url,
             "posted_date": r.posted_date.isoformat() if r.posted_date else None}

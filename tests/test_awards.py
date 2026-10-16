@@ -99,3 +99,25 @@ def test_job_reads_each_pdf_once_and_links_to_pipeline(monkeypatch):
     ranked = awards.firm_rankings(rows)
     assert ranked[0]["name"] == "IPW Construction Group LLC" and ranked[0]["awards"] == 1
     assert {f["name"]: f["shortlists"] for f in ranked}["Choate Construction Company"] == 1
+
+
+def test_branch_suffixes_and_agency_spellings_merge():
+    assert awards.firm_key("McMillan Pazdan Smith Architecture - Charleston") == awards.firm_key("McMillan, Pazdan, Smith Architecture")
+    assert awards.firm_key("Hill Construction Services of Charleston, Inc.") == awards.firm_key("Hill Construction Services")
+    assert awards.firm_key("J MUSSELMAN") == awards.firm_key("J. Musselman Construction, Inc.")
+    assert awards.firm_key("Coastal Charleston Builders") != awards.firm_key("Coastal Builders")
+    assert awards.agency_name("COLLEGE OF CHARLESTON, Facility Management") == "College of Charleston"
+    assert awards.agency_name("Citadel") == "The Citadel"
+
+
+def test_a_second_run_waits_its_turn(monkeypatch):
+    from contextlib import asynccontextmanager
+    import app.services.parcel_analysis as pa
+
+    @asynccontextmanager
+    async def busy(session_factory, key=0):
+        yield False
+    monkeypatch.setattr(pa, "_single_runner_lock", busy)
+    monkeypatch.setattr(awards, "get_settings", lambda: SimpleNamespace(anthropic_api_key="test"))
+    out = asyncio.run(awards.run_awards_job(object(), FakeClient([])))
+    assert out["skipped"] == "another run is in progress"

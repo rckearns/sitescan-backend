@@ -144,6 +144,11 @@ def _patch_parcels(monkeypatch, saved, age, county):
     monkeypatch.setattr(parcels, "_save_features", save)
     monkeypatch.setattr(parcels, "fetch_county_parcel_features", fetch)
     monkeypatch.setattr(parcels, "_county_cache", {"at": 0.0, "features": None})
+    monkeypatch.setattr(parcels, "_refresh_task", {"task": None})
+
+    async def no_flags(features):
+        return None
+    monkeypatch.setattr(parcels, "_flag_recent_construction", no_flags)
     return state
 
 
@@ -153,15 +158,30 @@ def test_restart_uses_fresh_saved_copy(monkeypatch):
     assert state["county_calls"] == 0
 
 
-def test_stale_copy_is_refreshed_and_saved(monkeypatch):
+async def _then_wait_for_refresh():
+    first = await parcels.fetch_home_parcel_features()
+    task = parcels._refresh_task["task"]
+    if task is not None:
+        await task
+    return first, await parcels.fetch_home_parcel_features()
+
+
+def test_stale_copy_is_served_at_once_and_refreshed_in_background(monkeypatch):
     state = _patch_parcels(monkeypatch, ["old"], parcels.COUNTY_CACHE_SECONDS + 1, ["county"])
-    assert run(parcels.fetch_home_parcel_features()) == ["county"]
+    first, after = run(_then_wait_for_refresh())
+    assert first == ["old"] and after == ["county"]
     assert state["saved"] == ["county"] and state["county_calls"] == 1
 
 
-def test_county_outage_serves_saved_copy(monkeypatch):
-    _patch_parcels(monkeypatch, ["old"], parcels.COUNTY_CACHE_SECONDS + 1, httpx.ConnectError("down"))
-    assert run(parcels.fetch_home_parcel_features()) == ["old"]
+def test_county_outage_keeps_serving_saved_copy(monkeypatch):
+    state = _patch_parcels(monkeypatch, ["old"], parcels.COUNTY_CACHE_SECONDS + 1, httpx.ConnectError("down"))
+    first, after = run(_then_wait_for_refresh())
+    assert first == ["old"] and after == ["old"] and state["county_calls"] == 1   # not retried every request
+
+
+def test_cold_start_without_copy_waits_for_county(monkeypatch):
+    state = _patch_parcels(monkeypatch, None, None, ["county"])
+    assert run(parcels.fetch_home_parcel_features()) == ["county"] and state["saved"] == ["county"]
 
 
 def test_county_outage_without_copy_raises(monkeypatch):

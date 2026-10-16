@@ -304,27 +304,63 @@ async def _save_features(features: list) -> None:
 
 async def fetch_home_parcel_features() -> list[dict]:
     """County opportunity parcels: memory, then the saved database copy (survives
-    restarts/deploys), then the county service. Refreshed every few hours; if the
-    county is down, the last saved copy is served."""
+    restarts/deploys), then the county service.
+
+    A copy older than COUNTY_CACHE_SECONDS is still served straight away while a
+    background task fetches a fresh one. Refreshing inline made the first visitor
+    after each expiry wait 17s+ for the county service, which looked like an outage.
+    Only a cold start with no saved copy waits for the county."""
     async with _county_lock:
-        if _county_cache["features"] is not None and time.monotonic() - _county_cache["at"] < COUNTY_CACHE_SECONDS:
+        fresh = time.monotonic() - _county_cache["at"] < COUNTY_CACHE_SECONDS
+        if _county_cache["features"] is not None and fresh:
             return _county_cache["features"]
-        saved, age = await _load_saved_features()
-        if saved is not None and age < COUNTY_CACHE_SECONDS:
-            _county_cache["features"], _county_cache["at"] = saved, time.monotonic() - age
-            return saved
-        try:
-            features = await fetch_county_parcel_features()
-        except httpx.HTTPError:
+        if _county_cache["features"] is None:
+            saved, age = await _load_saved_features()
             if saved is not None:
-                logger.warning("County parcel service failed; serving the saved copy")
-                _county_cache["features"], _county_cache["at"] = saved, time.monotonic()
-                return saved
-            raise
-        await _flag_recent_construction(features)
-        await _save_features(features)
-        _county_cache["features"], _county_cache["at"] = features, time.monotonic()
-        return features
+                _county_cache["features"], _county_cache["at"] = saved, time.monotonic() - age
+                fresh = age < COUNTY_CACHE_SECONDS
+        if _county_cache["features"] is not None:
+            if not fresh:
+                _start_background_refresh()
+            return _county_cache["features"]
+        return await _refresh_from_county()
+
+
+_refresh_task: dict[str, Any] = {"task": None}
+
+
+def _start_background_refresh() -> None:
+    task = _refresh_task["task"]
+    if task is not None and not task.done():
+        return
+
+    async def run():
+        # Not under _county_lock: requests keep getting the current copy meanwhile.
+        try:
+            if time.monotonic() - _county_cache["at"] < COUNTY_CACHE_SECONDS:
+                return
+            await _refresh_from_county()
+        except Exception as exc:   # keep serving the copy we have
+            logger.warning(f"Background parcel refresh failed: {type(exc).__name__}: {exc}")
+
+    _refresh_task["task"] = asyncio.get_running_loop().create_task(run())
+
+
+async def _refresh_from_county() -> list[dict]:
+    """Fetch, flag and save a fresh list (one refresh at a time). If the county
+    fails and a copy exists, keep that copy (and don't retry until the next expiry)."""
+    try:
+        features = await fetch_county_parcel_features()
+    except httpx.HTTPError:
+        if _county_cache["features"] is not None:
+            logger.warning("County parcel service failed; keeping the saved copy")
+            _county_cache["at"] = time.monotonic()
+            return _county_cache["features"]
+        raise
+    await _flag_recent_construction(features)
+    await _save_features(features)
+    _county_cache["features"], _county_cache["at"] = features, time.monotonic()
+    return features
 
 
 async def _flag_recent_construction(features: list) -> None:

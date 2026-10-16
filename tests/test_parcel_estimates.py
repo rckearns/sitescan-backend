@@ -436,3 +436,15 @@ def test_job_counts_failures_and_never_raises(monkeypatch):
                                                  client=FakeClient(text="garbage"), session_factory=sf)
     summary = run(go())
     assert summary["failed"] == 4 and summary["generated"] == 0
+
+
+def test_if_rezoned_scenario_is_shown_but_never_recommended():
+    hotel = _scenario("Boutique Hotel (if rezoned)", noi=5_000_000, fit="by_right")
+    hotel["if_rezoned"] = True
+    a = json.loads(_ai_json(hotel, _scenario("Townhomes", noi=1_500_000)))
+    out = pa.finalize_analysis(a, 1_000_000)
+    by = {s["name"]: s for s in out["scenarios"]}
+    assert by["Boutique Hotel (if rezoned)"]["zoning_fit"] == "not_allowed"
+    assert by["Boutique Hotel (if rezoned)"]["proforma"]["financing"]["entitlement_months"] == 24
+    assert out["recommended_scenario"] == "Townhomes" and by["Townhomes"]["if_rezoned"] is False
+    assert "if rezoned" in pa.SYSTEM_PROMPT.lower()

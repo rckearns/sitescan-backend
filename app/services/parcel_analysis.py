@@ -86,6 +86,7 @@ Respond with valid JSON matching exactly this structure:
       "use_type": "e.g. Boutique Hotel, Mixed-Use Retail/Office, Multifamily",
       "description": "2-3 sentences on why this use fits and market demand",
       "zoning_fit": "by_right | needs_approval | not_allowed",
+      "if_rezoned": false,
       "zoning_notes": "One sentence: what the zoning allows for this scenario and what approvals it needs",
       "assumptions": {
         "exit": "hold | sell",
@@ -110,6 +111,13 @@ Respond with valid JSON matching exactly this structure:
 Rules:
 - Respect the zoning given in the prompt: base zoning, height district (stories) and overlays.
   Size gross_sf to what the lot and height limit can realistically hold. Mark zoning_fit honestly.
+- In addition to the 2-3 scenarios above, add exactly one "if rezoned" scenario: the most valuable
+  use the current zoning does NOT allow (for example a boutique hotel where there is no
+  Accommodations Overlay, or more height or density than the district allows). Set "if_rezoned": true
+  and "zoning_fit": "not_allowed", size it to what a rezoning could realistically win on this site and
+  block (not to the maximum anywhere in the city), and use zoning_notes to name every approval it
+  needs (rezoning, overlay, height, BAR, Council) and how likely that is. If nothing beyond the current
+  zoning is plausible, skip it. All other scenarios have "if_rezoned": false.
 - hard_cost_psf: current construction cost per gross SF for this building type in Charleston,
   including structured parking if the scenario needs it.
 - exit: "hold" for income property valued on NOI and a cap rate (hotels, apartments, office, retail);
@@ -307,6 +315,9 @@ def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None,
             continue
         fit = str(s.get("zoning_fit") or "").strip().lower().replace(" ", "_")
         s["zoning_fit"] = fit if fit in ZONING_FITS else "needs_approval"
+        s["if_rezoned"] = s.get("if_rezoned") is True
+        if s["if_rezoned"]:
+            s["zoning_fit"] = "not_allowed"     # never recommended; carried 24 months of approvals
         assumptions = s.get("assumptions")
         pf = build_proforma(assumptions if isinstance(assumptions, dict) else {}, float(basis), s["zoning_fit"])
         if pf is None:
@@ -327,6 +338,9 @@ def finalize_analysis(analysis: dict, basis: int, zoning: Optional[dict] = None,
     analysis["model"] = analysis.get("model") or model_name()
     analysis["version"] = version or ANALYSIS_VERSION
     return analysis
+
+
+REZONING_PROMPT_REV = 1   # analyses from this prompt revision were asked for an "if rezoned" scenario
 
 
 def is_servable(analysis: Any) -> bool:
@@ -409,6 +423,7 @@ async def generate_analysis(
                 continue
             raise AnalysisInvalidJSON("AI returned invalid response") from e
     analysis["model"] = model
+    analysis["rezoning_checked"] = REZONING_PROMPT_REV
     return finalize_analysis(analysis, land_basis(parcel), zoning)
 
 

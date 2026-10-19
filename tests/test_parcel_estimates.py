@@ -448,3 +448,25 @@ def test_if_rezoned_scenario_is_shown_but_never_recommended():
     assert by["Boutique Hotel (if rezoned)"]["proforma"]["financing"]["entitlement_months"] == 24
     assert out["recommended_scenario"] == "Townhomes" and by["Townhomes"]["if_rezoned"] is False
     assert "if rezoned" in pa.SYSTEM_PROMPT.lower()
+
+
+def test_custom_scenario_is_added_and_replaces_an_earlier_request():
+    base = pa.finalize_analysis(json.loads(_ai_json(_scenario("Townhomes", noi=1_500_000))), 1_000_000, {"base_zoning": "DR-2F"})
+    hotel = _scenario("Boutique Hotel", noi=2_000_000, fit="not_allowed")
+    client = FakeClient(text=json.dumps({"scenario": hotel}))
+    out = run(pa.add_custom_scenario({"TMS": "t"}, "t", "  boutique\nhotel ", base, client=client))
+    assert "boutique hotel" in client.calls[0]["messages"][0]["content"]
+    custom = [s for s in out["scenarios"] if s.get("custom")]
+    assert len(custom) == 1 and custom[0]["requested_use"] == "boutique hotel"
+    assert custom[0]["zoning_fit"] == "not_allowed" and custom[0]["if_rezoned"] is True
+    assert out["recommended_scenario"] == "Townhomes" and out["version"] == base["version"]
+    again = run(pa.add_custom_scenario({"TMS": "t"}, "t", "Boutique Hotel", out, client=FakeClient(text=json.dumps({"scenario": hotel}))))
+    assert len([s for s in again["scenarios"] if s.get("custom")]) == 1 and len(again["scenarios"]) == 2
+
+
+def test_custom_scenario_rejects_empty_use_and_bad_numbers():
+    base = pa.finalize_analysis(json.loads(_ai_json()), 1_000_000)
+    with pytest.raises(pa.AnalysisError):
+        run(pa.add_custom_scenario({}, "t", "   ", base, client=FakeClient()))
+    with pytest.raises(pa.AnalysisInvalidJSON):
+        run(pa.add_custom_scenario({}, "t", "hotel", base, client=FakeClient(text=json.dumps({"scenario": {"name": "x", "assumptions": {}}}))))

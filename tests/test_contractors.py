@@ -152,3 +152,17 @@ def test_architects_and_wall_contractors_are_never_the_gc():
     out = cm.gc_leaderboard_from([job], min_value=1e6, since=None, llr=cm.LlrIndex({}))
     assert [c["name"] for c in out] == ["Makson, Inc"]
     assert cm.is_gc("ARCO Design/Build", [])
+
+
+def test_roster_puts_construction_named_trade_licensees_in_their_trade():
+    llr = cm.LlrIndex({
+        cm.normalize_name("C R Hipp Construction Co Inc"): [{"classification": "PB"}, {"classification": "AC"}],
+        cm.normalize_name("Choate Construction Company"): [{"classification": "BD"}, {"classification": "GD"}],
+    })
+    projects = [_p("C R Hipp Construction Co Inc", 1e6, "plumbing"),
+                _p("Choate Construction Company", 5e6, "commercial"),
+                _p("Unlicensed Construction LLC", 1e6, "commercial")]
+    out = cm.roster_from(projects, llr, now=NOW)
+    assert [c["name"] for c in out["trades"]["plumbing"]["contractors"]] == ["C R Hipp Construction Co Inc"]
+    assert {c["name"] for c in out["trades"]["general"]["contractors"]} == {
+        "Choate Construction Company", "Unlicensed Construction LLC"}

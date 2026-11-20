@@ -650,6 +650,25 @@ def _roster_hint(name: str) -> str | None:
     return None
 
 
+def _roster_trade(name: str, licenses: list[dict]) -> str:
+    """A trade word in the name wins. A generic name ("C.R. Hipp Construction Co") is only
+    general if the company has no license, or holds a GC license; a trade-only license
+    (plumbing, HVAC, ...) puts it in that trade."""
+    t = infer_trade_from_name(name)
+    if t and t != "general":
+        return t
+    hint = _roster_hint(name)
+    if hint:
+        return hint
+    classes = [str(lic.get("classification") or "").upper() for lic in licenses]
+    if not set(classes) & GC_LICENSES:
+        for c in classes:
+            lt = _LLR_TRADE_MAP.get(c)
+            if lt and lt != "general":
+                return lt
+    return "general"
+
+
 def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_value: float = 0,
                 now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.utcnow()
@@ -671,13 +690,7 @@ def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_
             continue
         display_name = max(cdata["names"], key=len)
         licenses = llr.match(norm)
-        assigned = infer_trade_from_name(display_name) or _roster_hint(display_name)
-        if not assigned:
-            for lic in licenses:
-                assigned = _LLR_TRADE_MAP.get(lic["classification"])
-                if assigned:
-                    break
-        assigned = assigned or "general"
+        assigned = _roster_trade(display_name, licenses)
         if trade and assigned != trade:
             continue
         dates = [j.last_date for j in jobs if j.last_date]

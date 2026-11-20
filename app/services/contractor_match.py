@@ -18,7 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import DirectoryEntry, Project, get_session_factory
-from app.services.permit_sources import CONTRACTOR_SOURCES, PARCEL_FIELDS, TRADE_PERMIT_SOURCES
+from app.services.permit_sources import (
+    CONTRACTOR_SOURCES, PARCEL_FIELDS, TRADE_PERMIT_SOURCES, is_residential_permit, market_for,
+)
 
 log = logging.getLogger(__name__)
 
@@ -927,9 +929,18 @@ def link_subs(jobs: list[Job], trade_permits: list, llr: LlrIndex | None = None)
     return links
 
 
-def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: int = 15) -> dict[str, Any]:
-    """Group linked subs by trade, ranked by how many distinct jobs they worked."""
+# A sub is "primarily residential" when more than this share of its permits are house-scale.
+RESIDENTIAL_SHARE_CUTOFF = 0.5
+
+
+def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: int = 15,
+                   residential: dict[str, tuple[int, int]] | None = None,
+                   include_residential: bool = True) -> dict[str, Any]:
+    """Group linked subs by trade, ranked by how many distinct jobs they worked.
+    `residential` maps a sub key to (residential permits, all permits); subs over
+    RESIDENTIAL_SHARE_CUTOFF are left out unless include_residential."""
     llr = llr or LlrIndex({})
+    residential = residential or {}
     trades: dict[str, dict[str, dict]] = {}
     for job, trade, name, when in links:
         key = normalize_name(name)
@@ -944,8 +955,14 @@ def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: i
             e["last_date"] = when
     out = {}
     for trade, subs in trades.items():
-        rows = []
+        rows, hidden = [], 0
         for e in subs.values():
+            res, total = residential.get(e["key"], (0, 0))
+            share = round(res / total, 2) if total else None
+            is_res = share is not None and share > RESIDENTIAL_SHARE_CUTOFF
+            if is_res and not include_residential:
+                hidden += 1
+                continue
             jobs = sorted(e["jobs"].values(), key=lambda j: j.value, reverse=True)
             rows.append({
                 "key": e["key"],
@@ -954,12 +971,52 @@ def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: i
                 "job_value": sum(j.value for j in jobs),
                 "gcs": sorted(e["gcs"] - e["names"])[:6],
                 "last_date": e["last_date"].isoformat() if e["last_date"] else None,
+                "residential_share": share,
+                "permit_count": total,
+                "primarily_residential": is_res,
                 "jobs": [j.out() for j in jobs[:5]],
             })
         rows.sort(key=lambda r: (r["job_count"], r["job_value"]), reverse=True)
-        out[trade] = {"label": SUB_TRADES[trade], "subs": rows[:per_trade], "total": len(rows)}
+        if rows or hidden:
+            out[trade] = {"label": SUB_TRADES[trade], "subs": rows[:per_trade], "total": len(rows),
+                          "hidden_residential": hidden}
     order = list(SUB_TRADES)
     return dict(sorted(out.items(), key=lambda kv: order.index(kv[0])))
+
+
+# Every contractor's residential share: (house-scale permits, all permits) by normalized name.
+_residential_cache: dict[str, Any] = {"at": 0.0, "index": None}
+
+
+async def load_residential_index(db: AsyncSession) -> dict[str, tuple[int, int]]:
+    import time
+    from types import SimpleNamespace
+    if _residential_cache["index"] is not None and time.time() - _residential_cache["at"] < LLR_CACHE_SECONDS:
+        return _residential_cache["index"]
+    counts: dict[str, list[int]] = {}
+    rows = await db.execute(select(Project.contractor, Project.category, Project.source_id, Project.raw_data).where(
+        Project.source_id.in_(CONTRACTOR_SOURCES), Project.contractor.is_not(None), Project.contractor != ""))
+    for contractor, category, source_id, raw in rows:
+        res = is_residential_permit(SimpleNamespace(category=category, source_id=source_id, raw_data=raw))
+        for name in _names(contractor):
+            c = counts.setdefault(normalize_name(name), [0, 0])
+            c[0] += res
+            c[1] += 1
+    index = {k: (r, t) for k, (r, t) in counts.items() if k}
+    _residential_cache.update(at=time.time(), index=index)
+    return index
+
+
+async def _with_contacts(trades: dict[str, Any]) -> dict[str, Any]:
+    """Add each shown sub's phone, website, address and whether it's local to the job's market."""
+    from app.services.contractor_contacts import contact_out, load_profiles
+    keys = list({r["key"] for t in trades.values() for r in t["subs"]})
+    profiles = await load_profiles(keys)
+    for t in trades.values():
+        for r in t["subs"]:
+            market = market_for(r["jobs"][0]["source_id"]) if r["jobs"] else None
+            r.update(contact_out(profiles.get(r["key"]), market))
+    return trades
 
 
 async def _trade_permits(db: AsyncSession, since: datetime | None) -> list:
@@ -970,7 +1027,7 @@ async def _trade_permits(db: AsyncSession, since: datetime | None) -> list:
     return (await db.execute(select(Project).where(*conds))).scalars().all()
 
 
-async def subs_for_gc(key: str) -> dict[str, Any]:
+async def subs_for_gc(key: str, include_residential: bool = False, per_trade: int = 15) -> dict[str, Any]:
     """The subs who've worked on this GC's jobs."""
     key = (key or "").strip().lower()
     async with get_session_factory()() as db:
@@ -978,11 +1035,16 @@ async def subs_for_gc(key: str) -> dict[str, Any]:
         dates = [j.first_date for j in jobs if j.first_date]
         trade = await _trade_permits(db, min(dates) - SUB_WINDOW_BEFORE) if dates else []
         llr = await load_llr_index(db)
+        residential = await load_residential_index(db)
     links = [l for l in link_subs(jobs, trade, llr) if normalize_name(l[2]) != key]
-    return {"key": key, "jobs_checked": len(jobs), "trades": aggregate_subs(links, llr)}
+    trades = aggregate_subs(links, llr, per_trade=per_trade, residential=residential,
+                            include_residential=include_residential)
+    return {"key": key, "jobs_checked": len(jobs), "trades": await _with_contacts(trades)}
 
 
-async def proven_subs(min_value: float = 5_000_000, days: int = 1825, categories: list | None = None) -> dict[str, Any]:
+async def proven_subs(min_value: float = 5_000_000, days: int = 1825, categories: list | None = None,
+                      include_residential: bool = False, per_trade: int = 15,
+                      contacts: bool = True) -> dict[str, Any]:
     """Subs on commercial jobs of at least `min_value` (optionally of given building types)."""
     since = datetime.utcnow() - timedelta(days=days) if days else None
     async with get_session_factory()() as db:
@@ -995,5 +1057,21 @@ async def proven_subs(min_value: float = 5_000_000, days: int = 1825, categories
                 and (not categories or (j.category or "") in categories)]
         trade = await _trade_permits(db, (since - SUB_WINDOW_BEFORE) if since else None)
         llr = await load_llr_index(db)
-    return {"min_value": min_value, "days": days, "jobs_checked": len(jobs),
-            "trades": aggregate_subs(link_subs(jobs, trade, llr), llr)}
+        residential = await load_residential_index(db)
+    trades = aggregate_subs(link_subs(jobs, trade, llr), llr, per_trade=per_trade, residential=residential,
+                            include_residential=include_residential)
+    if contacts:
+        trades = await _with_contacts(trades)
+    return {"min_value": min_value, "days": days, "jobs_checked": len(jobs), "trades": trades}
+
+
+async def sub_names_for_lookup() -> dict[str, tuple[str, str]]:
+    """Every sub the subs lists can show (widest settings: $1M+ jobs, 5 years, non-residential),
+    as key -> (name, market id), for the daily contact lookup."""
+    out = await proven_subs(min_value=1_000_000, days=1825, per_trade=100_000, contacts=False)
+    names: dict[str, tuple[str, str]] = {}
+    for t in out["trades"].values():
+        for r in t["subs"]:
+            market = market_for(r["jobs"][0]["source_id"]) if r["jobs"] else None
+            names.setdefault(r["key"], (r["name"], market.id if market else ""))
+    return names

@@ -253,15 +253,33 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
         "outSR": "4326",
     }
 
+    # Single-family trade permits, fetched on their own: only to tell which subs work mostly
+    # on houses (stored as category "residential", never matched to jobs). The main Layer 20
+    # query is already near the 5,000-record limit, so they can't be added to it.
+    _RESIDENTIAL_TRADE_TYPES = (
+        "Electrical - Single Family/Duplex Dwelling",
+        "Roofing - Single Family/Duplex Dwelling",
+        "Plumbing - Single Family/Duplex Dwelling",
+        "xDNU Mechanical - Single Family/Duplex Dwelling",
+    )
+    layer20_res_params = dict(layer20_params, where=(
+        "PERMIT_TYPE IN (" + ", ".join(f"'{t}'" for t in _RESIDENTIAL_TRADE_TYPES) + ")"
+        " AND PERMIT_STATUS NOT IN ('Void', 'Cancelled')"))
+
     results = []
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             # Fetch both layers concurrently
-            resp20, resp21 = await asyncio.gather(
+            resp20, resp21, resp20_res = await asyncio.gather(
                 client.get(f"{_ARCGIS_BASE}/20/query", params=layer20_params),
                 client.get(f"{_ARCGIS_BASE}/21/query", params=layer21_params),
+                client.get(f"{_ARCGIS_BASE}/20/query", params=layer20_res_params),
+                return_exceptions=True,
             )
+            for r in (resp20, resp21):
+                if isinstance(r, BaseException):
+                    raise r
             resp20.raise_for_status()
             resp21.raise_for_status()
 
@@ -274,7 +292,16 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 data21 = {}
             feats20 = data20.get("features", [])
             feats21 = data21.get("features", [])
-            logger.info(f"ArcGIS Layer 20: {len(feats20)} features, Layer 21: {len(feats21)} features")
+            feats20_res = []
+            try:                     # optional: a failure here never stops the scan
+                if isinstance(resp20_res, BaseException):
+                    raise resp20_res
+                resp20_res.raise_for_status()
+                feats20_res = resp20_res.json().get("features", [])
+            except Exception as exc:
+                logger.warning(f"ArcGIS Layer 20 single-family trade permits skipped: {exc}")
+            logger.info(f"ArcGIS Layer 20: {len(feats20)} features, Layer 21: {len(feats21)} features, "
+                        f"single-family trade: {len(feats20_res)}")
 
             # Merge and deduplicate by PMPERMITID then PERMIT_NUMBER (Layer 20 takes precedence).
             # Some records have an empty PMPERMITID; PERMIT_NUMBER is a reliable fallback
@@ -282,7 +309,7 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
             seen_pids: set[str] = set()
             seen_pnums: set[str] = set()
             features = []
-            for f in feats20 + feats21:
+            for f in feats20 + feats21 + feats20_res:
                 attrs = f.get("attributes", {})
                 pid = str(attrs.get("PMPERMITID") or "")
                 pnum = str(attrs.get("PERMIT_NUMBER") or "")
@@ -391,7 +418,9 @@ async def scan_charleston_permits(arcgis_url="", record_count=500, skip_energov_
                 ext_id = str(a.get("PERMIT_NUMBER") or a.get("OBJECTID") or abs(hash(title)))
                 if is_trade_permit:
                     pt = permit_type.lower()
-                    if "fire" in pt or "sprinkler" in pt:
+                    if "single family" in pt:
+                        cat = "residential"
+                    elif "fire" in pt or "sprinkler" in pt:
                         cat = "fire-sprinkler"
                     elif "electrical" in pt:
                         cat = "electrical"

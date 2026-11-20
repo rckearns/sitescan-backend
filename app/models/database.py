@@ -292,6 +292,27 @@ class DirectoryEntry(Base):
     )
 
 
+class ContractorProfile(Base):
+    """A contractor's business listing (phone, website, address), looked up once by name."""
+    __tablename__ = "contractor_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(255), nullable=False, unique=True, index=True)   # normalize_name()
+    name = Column(String(255), default="")            # the permit name that was looked up
+    status = Column(String(20), default="")           # found | not_found | error
+    listing_name = Column(String(255), default="")    # the business name Google returned
+    phone = Column(String(50), default="")
+    website = Column(String(500), default="")
+    address = Column(String(500), default="")
+    city = Column(String(120), default="")
+    county = Column(String(120), default="")
+    state = Column(String(10), default="")
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    place_id = Column(String(255), default="")
+    looked_up_at = Column(DateTime, default=datetime.utcnow)
+
+
 class PipelineProject(Base):
     """One construction project tracked from early signals to solicitation (GC pipeline)."""
     __tablename__ = "pipeline_projects"

@@ -178,3 +178,38 @@ def test_roster_lists_construction_named_licensees_under_each_licensed_trade():
     assert list(only_hvac["trades"]) == ["hvac"]
     assert {c["name"] for c in out["trades"]["general"]["contractors"]} == {
         "Choate Construction Company", "Unlicensed Construction LLC"}
+
+
+def test_one_classifier_drives_gc_board_and_subs():
+    llr = cm.LlrIndex({
+        cm.normalize_name("H.R. Allen, Inc"): [{"classification": c, "license_status": "Active"} for c in ("AC", "BD", "EL", "HT", "PB")],
+        cm.normalize_name("C R Hipp Construction Co Inc"): [{"classification": c, "license_status": "Active"} for c in ("HT", "PB", "AC", "BD")],
+        cm.normalize_name("Gulf Stream Construction Company Inc"): [{"classification": c, "license_status": "Active"} for c in ("BD", "CCM", "EL", "GD")],
+        cm.normalize_name("Frampton Construction"): [{"classification": c, "license_status": "Active"} for c in ("BD", "CCM")],
+    })
+    # MEP firms with a GC license are not GCs; a construction manager still is.
+    assert not cm.is_gc("H.R. Allen, Inc", llr.match(cm.normalize_name("H.R. Allen, Inc")))
+    assert cm.is_gc("Gulf Stream Construction Company Inc", llr.match(cm.normalize_name("Gulf Stream Construction Company Inc")))
+    assert cm.contractor_trades("Gulf Stream Construction Company Inc",
+                                llr.match(cm.normalize_name("Gulf Stream Construction Company Inc"))) == ["general"]
+    job = _p("Frampton Construction | C R Hipp Construction Co Inc | Johnson Controls, Inc.", 20e6, parcel="J1")
+    board = cm.gc_leaderboard_from([job, _p("H.R. Allen, Inc", 30e6, parcel="J2")], min_value=1e6, since=None, llr=llr)
+    assert [c["name"] for c in board] == ["Frampton Construction"]
+    subs = cm.aggregate_subs(cm.link_subs(cm.group_jobs([job]), [], llr), llr)
+    assert {t: [r["name"] for r in v["subs"]] for t, v in subs.items()} == {
+        "plumbing": ["C R Hipp Construction Co Inc"],
+        "mechanical": ["C R Hipp Construction Co Inc", "Johnson Controls, Inc."],
+    }
+
+
+def test_parcel_field_comes_from_source_registry():
+    from app.services import permit_sources as ps
+    assert "MAIN_PARCEL_NUMBER" in ps.PARCEL_FIELDS
+    assert set(cm.PERMIT_SOURCES) == {s.id for s in ps.SOURCES.values() if s.contractors}
+    assert "charlotte-permits" not in cm.PERMIT_SOURCES and "charlotte-permits" in ps.ALL_PERMIT_SOURCES
+
+
+def test_names_with_several_trade_words_get_each_trade():
+    assert cm.contractor_trades("PARDEE HEATING & A/C PLUMBING", []) == ["hvac", "plumbing"]
+    assert cm.contractor_trades("Hyman Plumbing Co.", [{"classification": "BD"}]) == ["plumbing"]
+    assert cm.sub_trades("Satterfield Electrical & HVAC, LLC", []) == ["electrical", "mechanical"]

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import DirectoryEntry, Project, get_session_factory
+from app.services.permit_sources import CONTRACTOR_SOURCES, PARCEL_FIELDS, TRADE_PERMIT_SOURCES
 
 log = logging.getLogger(__name__)
 
@@ -477,7 +478,9 @@ def _names(contractor_field: str | None) -> list[str]:
 def _site(p) -> str | None:
     """Parcel number when the permit has one, else the street address without unit/floor suffixes."""
     raw = getattr(p, "raw_data", None) or {}
-    parcel = str(raw.get("MAIN_PARCEL_NUMBER") or "").strip().upper() if isinstance(raw, dict) else ""
+    parcel = ""
+    if isinstance(raw, dict):
+        parcel = next((str(raw[f]).strip().upper() for f in PARCEL_FIELDS if raw.get(f)), "")
     if parcel:
         return "P:" + parcel
     addr = re.sub(r"\s+", " ", (getattr(p, "address", "") or "").upper()).strip()
@@ -551,12 +554,6 @@ def _is_open_job(job: Job, now: datetime) -> bool:
     return job.is_open and bool(job.last_date) and now - job.last_date <= OPEN_WITHIN
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Who's the GC on a permit
-# ──────────────────────────────────────────────────────────────────────────────
-# Building permits list everyone with a contractor role, so a hotel permit can name the
-# GC plus its radio, hood and fire alarm installers.
-
 GC_LICENSES = {"BD", "CCM"}
 NOT_GC_NAME_RE = re.compile(
     r"fire|sprinkler|security|alarm|radio|communicat|utilit|logistic|controls|hood|elevator|"
@@ -570,8 +567,79 @@ GC_NAME_RE = re.compile(r"construct|builder|building|contracting|general\s+contr
                         re.IGNORECASE)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# A contractor's trades: the one classifier every contractor view uses
+# ──────────────────────────────────────────────────────────────────────────────
+# By trade, the GC leaderboard and the subs lists all go through contractor_trades(), so a
+# rule changed here applies everywhere, for every city. Nothing in it is city-specific:
+# only the license codes (_LLR_TRADE_MAP, GC_LICENSES) are per state.
+
+# Name words that point to a trade without naming it.
+_NAME_HINTS = [
+    ("fire-protection", re.compile(r"fire|sprinkler|alarm|security|radio|communicat|low\s*voltage", re.IGNORECASE)),
+    ("grading-sitework", re.compile(r"utilit|site\s*logistic", re.IGNORECASE)),
+    ("hvac", re.compile(r"\bcontrols\b|chiller|hood\s*system", re.IGNORECASE)),
+]
+# A GC-licensed or GC-named firm with one of these licenses is an MEP firm (C.R. Hipp,
+# H.R. Allen). GCs often also carry grading, concrete or renovation licenses; those don't count.
+_MEP_TRADES = ("plumbing", "hvac", "electrical")
+# A construction-manager license marks a real GC even when it also holds trade licenses
+# (Gulf Stream Construction: CCM, BD, EL, GD, ...).
+_CM_LICENSES = {"CCM"}
+
+
+def _name_hint(name: str) -> str | None:
+    for trade, rx in _NAME_HINTS:
+        if rx.search(name):
+            return trade
+    return None
+
+
+def contractor_trades(name: str, licenses: list[dict]) -> list[str]:
+    """Every trade a contractor works in; ["general"] for a GC or an unclassified firm.
+
+    1. Trade words in the name win ("Hyman Plumbing" -> plumbing; "Pardee Heating & A/C
+       Plumbing" -> hvac and plumbing).
+    2. Then a name hint ("Johnson Controls" -> hvac).
+    3. Then the active trade licenses: C.R. Hipp Construction (PB, HT, AC and BD) is
+       plumbing and HVAC. A GC-licensed or "Construction"-named firm leaves general only
+       for MEP licenses, and a construction-manager license keeps it general.
+    4. Lapsed trade licenses count only for a firm with no active one and no GC license.
+    """
+    named = [tid for tid, rx in _NAME_TRADE_PATTERNS if tid != "general" and rx.search(name)]
+    if named:                      # "Pardee Heating & A/C Plumbing" -> hvac and plumbing
+        return sorted(named)
+    t = infer_trade_from_name(name)
+    hint = _name_hint(name)
+    if hint:
+        return [hint]
+    active, lapsed, gc_licensed, cm_active = [], [], False, False
+    for lic in licenses:
+        is_active = str(lic.get("license_status") or "active").strip().lower() == "active"
+        cls = str(lic.get("classification") or "").upper()
+        lt = _LLR_TRADE_MAP.get(cls)
+        if cls in GC_LICENSES:
+            gc_licensed = True    # even lapsed: the firm has been a GC
+            cm_active = cm_active or (is_active and cls in _CM_LICENSES)
+        elif lt and lt != "general":
+            (active if is_active else lapsed).append(lt)
+    if cm_active:
+        return ["general"]
+    if gc_licensed or t == "general":   # GC license, or a "Construction"/"Builders" name
+        trades = [x for x in active if x in _MEP_TRADES]
+    else:
+        trades = active or lapsed
+    return sorted(set(trades)) or ["general"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Who's the GC on a permit
+# ──────────────────────────────────────────────────────────────────────────────
+# Building permits list everyone with a contractor role, so a hotel permit can name the
+# GC plus its radio, hood and fire alarm installers.
+
 def is_gc(name: str, licenses: list[dict]) -> bool:
-    if NOT_GC_NAME_RE.search(name) or infer_trade_from_name(name) not in (None, "general"):
+    if NOT_GC_NAME_RE.search(name) or contractor_trades(name, licenses) != ["general"]:
         return False
     classes = {str(lic.get("classification") or "").upper() for lic in licenses}
     if classes & GC_LICENSES:
@@ -583,7 +651,7 @@ def is_gc(name: str, licenses: list[dict]) -> bool:
 
 def _neutral(name: str, licenses: list[dict]) -> bool:
     """Not obviously a trade: no trade words, no trade-only license (could be an out-of-town GC)."""
-    if NOT_GC_NAME_RE.search(name) or infer_trade_from_name(name) not in (None, "general"):
+    if NOT_GC_NAME_RE.search(name) or contractor_trades(name, licenses) != ["general"]:
         return False
     classes = {str(lic.get("classification") or "").upper() for lic in licenses}
     return not classes or bool(classes & GC_LICENSES)
@@ -599,8 +667,8 @@ def job_gcs(job: "Job", llr: "LlrIndex") -> set:
     return {k for k, n in job.names.items() if _neutral(n, llr.match(k))}
 
 
-# Trades for the sub lists: from the permit type on trade permits, or the company's
-# name / license when a sub is named on a building permit.
+# Trades for the sub lists: from the permit type on trade permits, or contractor_trades()
+# when a sub is named on a building permit.
 SUB_TRADES = {
     "electrical": "Electrical", "plumbing": "Plumbing & gas", "mechanical": "Mechanical / HVAC",
     "fire-sprinkler": "Fire protection & alarm", "roofing": "Roofing", "masonry": "Masonry",
@@ -610,77 +678,22 @@ SUB_TRADES = {
     "painting": "Painting", "other": "Other specialty",
 }
 TRADE_CATEGORIES = {k: SUB_TRADES[k] for k in ("electrical", "plumbing", "mechanical", "fire-sprinkler", "roofing", "painting")}
-_NAME_TRADE_TO_SUB = {"hvac": "mechanical", "fire-protection": "fire-sprinkler"}
-_SUB_NAME_HINTS = [
-    ("fire-sprinkler", re.compile(r"fire|sprinkler|alarm|security|radio|communicat|low\s*voltage", re.IGNORECASE)),
-    ("grading-sitework", re.compile(r"utilit|site\s*logistic|paving|grading|excavat", re.IGNORECASE)),
-]
+_TRADE_TO_SUB = {"hvac": "mechanical", "fire-protection": "fire-sprinkler", "general": "other"}
 NOT_BUILDING_CATEGORIES = {"residential", "trade-permit", *TRADE_CATEGORIES}
 
 
-def sub_trade(name: str, licenses: list[dict]) -> str:
-    t = infer_trade_from_name(name)
-    if t and t != "general":
-        return _NAME_TRADE_TO_SUB.get(t, t if t in SUB_TRADES else "other")
-    for trade, rx in _SUB_NAME_HINTS:
-        if rx.search(name):
-            return trade
-    for lic in licenses:
-        t = _LLR_TRADE_MAP.get(str(lic.get("classification") or "").upper())
-        if t and t != "general":
-            return _NAME_TRADE_TO_SUB.get(t, t if t in SUB_TRADES else "other")
-    return "other"
+def sub_trades(name: str, licenses: list[dict]) -> list[str]:
+    """contractor_trades() in the sub lists' trade ids."""
+    out = []
+    for t in contractor_trades(name, licenses):
+        t = _TRADE_TO_SUB.get(t, t)
+        out.append(t if t in SUB_TRADES else "other")
+    return list(dict.fromkeys(out))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Trade roster (By trade view)
 # ──────────────────────────────────────────────────────────────────────────────
-
-_ROSTER_HINTS = [
-    ("fire-protection", re.compile(r"fire|sprinkler|alarm|security|radio|communicat|low\s*voltage", re.IGNORECASE)),
-    ("grading-sitework", re.compile(r"utilit|site\s*logistic", re.IGNORECASE)),
-    ("hvac", re.compile(r"\bcontrols\b|chiller|hood\s*system", re.IGNORECASE)),
-]
-
-
-def _roster_hint(name: str) -> str | None:
-    for trade, rx in _ROSTER_HINTS:
-        if rx.search(name):
-            return trade
-    return None
-
-
-# Trades a GC-licensed firm is also listed under. GCs often carry grading, concrete or
-# renovation licenses; one holding plumbing, HVAC or electrical is an MEP firm.
-_MEP_TRADES = ("plumbing", "hvac", "electrical")
-
-
-def _roster_trades(name: str, licenses: list[dict]) -> list[str]:
-    """Every trade a contractor is listed under in the roster. A trade word in the name wins.
-    A generic name ("C.R. Hipp Construction") goes under each trade of its active trade
-    licenses (plumbing and HVAC). A GC-licensed or GC-named firm leaves general only for
-    MEP licenses: GCs often carry grading, concrete or renovation licenses too."""
-    t = infer_trade_from_name(name)
-    if t and t != "general":
-        return [t]
-    hint = _roster_hint(name)
-    if hint:
-        return [hint]
-    active, lapsed, gc_licensed = [], [], False
-    for lic in licenses:
-        is_active = str(lic.get("license_status") or "active").strip().lower() == "active"
-        cls = str(lic.get("classification") or "").upper()
-        lt = _LLR_TRADE_MAP.get(cls)
-        if cls in GC_LICENSES:
-            gc_licensed = True    # even lapsed: the firm has been a GC
-        elif lt and lt != "general":
-            (active if is_active else lapsed).append(lt)
-    if gc_licensed or t == "general":   # GC license, or a "Construction"/"Builders" name
-        trades = [x for x in active if x in _MEP_TRADES]
-    else:
-        trades = active or lapsed
-    return sorted(set(trades)) or ["general"]
-
 
 def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_value: float = 0,
                 now: datetime | None = None) -> dict[str, Any]:
@@ -703,7 +716,7 @@ def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_
             continue
         display_name = max(cdata["names"], key=len)
         licenses = llr.match(norm)
-        assigned_trades = _roster_trades(display_name, licenses)
+        assigned_trades = contractor_trades(display_name, licenses)
         if trade:
             if trade not in assigned_trades:
                 continue
@@ -758,7 +771,7 @@ async def build_permit_trade_roster(trade: str | None = None, source: str | None
 # One contractor's work
 # ──────────────────────────────────────────────────────────────────────────────
 
-PERMIT_SOURCES = ("charleston-permits", "north-charleston-permits", "mt-pleasant-permits")
+PERMIT_SOURCES = CONTRACTOR_SOURCES   # see permit_sources.py
 CONTRACTOR_PERMIT_LIMIT = 200
 
 
@@ -877,13 +890,12 @@ async def gc_leaderboard(min_value: float = 1_000_000, days: int = 730, limit: i
 # Subs on jobs
 # ──────────────────────────────────────────────────────────────────────────────
 # Two signals: (1) companies other than the GC named on the job's own building permits,
-# and (2) City of Charleston trade permits (electrical, plumbing, mechanical, fire,
+# and (2) trade permits (electrical, plumbing, mechanical, fire,
 # roofing) on the same parcel from 90 days before to two years after the job started.
-# Charleston is the only source that stores trade permits.
+# Only sources marked trade_permits in permit_sources.py store trade permits (Charleston).
 
 SUB_WINDOW_BEFORE = timedelta(days=90)
 SUB_WINDOW_AFTER = timedelta(days=730)
-SUB_SOURCE = "charleston-permits"
 
 
 def link_subs(jobs: list[Job], trade_permits: list, llr: LlrIndex | None = None) -> list[tuple]:
@@ -899,7 +911,8 @@ def link_subs(jobs: list[Job], trade_permits: list, llr: LlrIndex | None = None)
         gc_keys = job_gcs(job, llr)
         for key, name in job.names.items():
             if key not in gc_keys:
-                links.append((job, sub_trade(name, llr.match(key)), name, job.first_date))
+                for trade in sub_trades(name, llr.match(key)):
+                    links.append((job, trade, name, job.first_date))
         site = _site(job.permits[0])
         if not site or not job.first_date:
             continue
@@ -950,7 +963,7 @@ def aggregate_subs(links: list[tuple], llr: LlrIndex | None = None, per_trade: i
 
 
 async def _trade_permits(db: AsyncSession, since: datetime | None) -> list:
-    conds = [Project.source_id == SUB_SOURCE, Project.category.in_(list(TRADE_CATEGORIES)),
+    conds = [Project.source_id.in_(TRADE_PERMIT_SOURCES), Project.category.in_(list(TRADE_CATEGORIES)),
              Project.contractor.is_not(None), Project.contractor != ""]
     if since:
         conds.append(Project.posted_date >= since)

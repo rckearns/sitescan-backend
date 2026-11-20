@@ -154,15 +154,27 @@ def test_architects_and_wall_contractors_are_never_the_gc():
     assert cm.is_gc("ARCO Design/Build", [])
 
 
-def test_roster_puts_construction_named_trade_licensees_in_their_trade():
+def test_roster_lists_construction_named_licensees_under_each_licensed_trade():
     llr = cm.LlrIndex({
-        cm.normalize_name("C R Hipp Construction Co Inc"): [{"classification": "PB"}, {"classification": "AC"}],
-        cm.normalize_name("Choate Construction Company"): [{"classification": "BD"}, {"classification": "GD"}],
+        # live data: HVAC first, plumbing, and an active GC license
+        cm.normalize_name("C R Hipp Construction Co Inc"): [
+            {"classification": "HT", "license_status": "Active"}, {"classification": "PB", "license_status": "Active"},
+            {"classification": "AC", "license_status": "Active"}, {"classification": "BD", "license_status": "Active"}],
+        cm.normalize_name("Choate Construction Company"): [
+            {"classification": "BD", "license_status": "Active"}, {"classification": "EL", "license_status": "Lapsed"}],
+        cm.normalize_name("Sierras Construction LLC"): [
+            {"classification": "BD", "license_status": "Active"}, {"classification": "EL", "license_status": "Active"}],
     })
     projects = [_p("C R Hipp Construction Co Inc", 1e6, "plumbing"),
                 _p("Choate Construction Company", 5e6, "commercial"),
+                _p("Sierras Construction LLC", 1e6, "commercial"),
                 _p("Unlicensed Construction LLC", 1e6, "commercial")]
     out = cm.roster_from(projects, llr, now=NOW)
     assert [c["name"] for c in out["trades"]["plumbing"]["contractors"]] == ["C R Hipp Construction Co Inc"]
+    assert [c["name"] for c in out["trades"]["hvac"]["contractors"]] == ["C R Hipp Construction Co Inc"]
+    assert [c["name"] for c in out["trades"]["electrical"]["contractors"]] == ["Sierras Construction LLC"]
+    assert out["total_contractors"] == 4
+    only_hvac = cm.roster_from(projects, llr, trade="hvac", now=NOW)
+    assert list(only_hvac["trades"]) == ["hvac"]
     assert {c["name"] for c in out["trades"]["general"]["contractors"]} == {
         "Choate Construction Company", "Unlicensed Construction LLC"}

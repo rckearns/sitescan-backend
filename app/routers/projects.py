@@ -74,8 +74,7 @@ async def list_projects(
     # Exclude permit records older than 3 years — they're not actionable opportunities.
     # Bid sources (SCBO, SAM.gov) are exempt since they're short-lived by nature.
     from datetime import datetime, timedelta
-    _PERMIT_SOURCES = ["charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
-                       "charlotte-permits", "charlotte-land-dev"]
+    from app.services.permit_sources import ALL_PERMIT_SOURCES as _PERMIT_SOURCES
     _cutoff = datetime.utcnow() - timedelta(days=3 * 365)
     conditions.append(
         or_(
@@ -374,8 +373,7 @@ async def project_stats(
 ):
     """Get summary statistics computed against the user's scoring criteria."""
     from datetime import datetime, timedelta
-    _PERMIT_SOURCES = ["charleston-permits", "north-charleston-permits", "mt-pleasant-permits",
-                       "charlotte-permits", "charlotte-land-dev"]
+    from app.services.permit_sources import ALL_PERMIT_SOURCES as _PERMIT_SOURCES
     _cutoff = datetime.utcnow() - timedelta(days=3 * 365)
     result = await db.execute(
         select(Project).where(

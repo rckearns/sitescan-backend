@@ -368,6 +368,27 @@ class PipelineEventRow(Base):
     project = relationship("PipelineProject", back_populates="events")
 
 
+PIPELINE_SAVE_STATUSES = ("interested", "contacted", "pursuing", "bidding", "won", "lost", "passed")
+
+
+class PipelineSave(Base):
+    """A user's private tracking of a pipeline project: status plus free-text notes.
+
+    Pipeline projects and their events are shared by every user; anything that
+    came to one user privately (an owner's call, who else is pricing) lives here.
+    """
+    __tablename__ = "pipeline_saves"
+    __table_args__ = (UniqueConstraint("user_id", "project_id", name="uq_pipeline_save_user_project"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("pipeline_projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(30), default="interested")
+    notes = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class BidNarrative(Base):
     """Saved Bid Assist output, keyed by a hash of the model + prompt (profile + RFQ)."""
     __tablename__ = "bid_narratives"

@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Auth
     access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
     algorithm: str = "HS256"
+    # Comma-separated emails allowed to write shared data (e.g. pipeline research
+    # notes). Empty = nobody, so admin endpoints are closed until this is set.
+    admin_emails: str = ""
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./sitescan.db"

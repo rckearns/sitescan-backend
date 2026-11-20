@@ -28,6 +28,11 @@ STAGES = (
 
 DELIVERY_METHODS = ("cmr", "design-build", "qualifications", "design-bid-build", "")
 
+# Source name for hand-entered research notes (facts from public records or press
+# that no polled document carries). Notes add to a project's timeline and AI
+# summary but never move its stage; see store.refresh_rollup.
+NOTE_SOURCE = "intel"
+
 
 @dataclass
 class PipelineEvent:

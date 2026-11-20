@@ -14,7 +14,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import PipelineEventRow, PipelineProject
-from app.services.pipeline.events import STAGES, PipelineEvent
+from app.services.pipeline.events import NOTE_SOURCE, STAGES, PipelineEvent
 
 # When several documents state a delivery method, the main-project methods win
 # over a design-bid-build enabling package.
@@ -191,16 +191,23 @@ async def refresh_rollup(db: AsyncSession, project_id: int) -> None:
     dated = sorted([e for e in events if e.event_date], key=lambda e: e.event_date)
     latest = dated[-1] if dated else events[-1]
 
+    # Research notes add facts but never move the stage: it comes from the
+    # newest document event (or the newest note if a project has only notes).
+    documents = [e for e in dated if e.source != NOTE_SOURCE] or [e for e in events if e.source != NOTE_SOURCE]
+    stage_src = documents[-1] if documents else latest
+
     by_date = sorted(events, key=lambda e: (e.event_date is None, e.event_date or datetime.min))
     pip_events = [e for e in by_date if (e.extra or {}).get("pip_number")]
-    title_src = pip_events[-1] if pip_events else latest   # newest official name wins
+    note_events = [e for e in by_date if e.source == NOTE_SOURCE]
+    # Newest official name wins; otherwise a curated note title beats agenda text.
+    title_src = pip_events[-1] if pip_events else (note_events[-1] if note_events else latest)
     project.title = (project_title(title_src.title) or project.title or "")[:500]
     # Trim to column sizes: Postgres rejects over-long values (SQLite in tests doesn't).
     project.pip_number = (next(((e.extra or {}).get("pip_number") for e in reversed(pip_events)), project.pip_number or "") or "")[:20]
     project.owner = (next(((e.extra or {}).get("owner") for e in reversed(events) if (e.extra or {}).get("owner")), project.owner or "") or "")[:255]
     project.address = (next((e.address for e in events if e.address), project.address or "") or "")[:500]
     project.city = (next((e.location for e in reversed(events) if e.location), project.city or "") or "")[:120]
-    project.current_stage = latest.stage
+    project.current_stage = stage_src.stage
     project.first_event_date = dated[0].event_date if dated else None
     project.last_event_date = latest.event_date
     now = datetime.utcnow()

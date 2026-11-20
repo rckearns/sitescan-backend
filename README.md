@@ -105,6 +105,12 @@ curl http://localhost:8000/api/v1/projects?min_match=70&sort_by=match_score \
 - `GET /api/v1/projects/saved/list` — List saved projects
 - `DELETE /api/v1/projects/saved/{id}` — Remove bookmark
 
+### GC pipeline
+- `GET /api/v1/pipeline/projects` — Pipeline projects matched to your GC profile (`include_excluded`, `saved_only`). Each project carries your own `saved` status/notes or `null`; projects you saved are always returned.
+- `PUT /api/v1/pipeline/projects/{id}/save` — Set your private status (`interested`, `contacted`, `pursuing`, `bidding`, `won`, `lost`, `passed`) and notes. Only you see them.
+- `DELETE /api/v1/pipeline/projects/{id}/save` — Remove them
+- `POST /api/v1/pipeline/notes` — **Admin only** (`ADMIN_EMAILS`). Add research notes: public facts no polled document carries (a zoning appeals ruling, design-packet numbers, press). Every user sees them. Notes join the project's timeline and AI summary but never move its stage; a note's title (text before " – ") becomes the project name. Re-sending a note is a no-op.
+
 ### Scan
 - `POST /api/v1/scan/trigger` — Manual scan (all or specific sources)
 - `GET /api/v1/scan/history` — View scan logs
@@ -134,6 +140,20 @@ Projects are scored 0-99 based on keyword relevance:
 - **Below 60**: Weak match (tangentially related)
 
 Location bonuses for Charleston metro area. Penalties for irrelevant trades (IT, landscaping, etc.).
+
+## Maintenance Scripts
+
+Run from the repo root with the app's environment (e.g. `railway run ...`):
+
+```bash
+# Read past city board agendas into the GC pipeline (the daily job's first run
+# only looked back 120 days). Agendas already read are skipped.
+python -m scripts.backfill_boards --since 2024-01-01 [--boards BAR-L TRC]
+
+# Add research notes from a JSON file (same shape as POST /pipeline/notes entries)
+python -m scripts.add_research_notes notes.json --dry-run
+python -m scripts.add_research_notes notes.json
+```
 
 ## Deployment
 

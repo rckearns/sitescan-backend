@@ -64,3 +64,16 @@ async def get_current_user(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive")
     return user
+
+
+def is_admin(user) -> bool:
+    """True if the user's email is listed in ADMIN_EMAILS (case-insensitive)."""
+    allowed = {e.strip().lower() for e in get_settings().admin_emails.split(",") if e.strip()}
+    return bool(allowed) and (getattr(user, "email", "") or "").lower() in allowed
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """FastAPI dependency for endpoints that change data every user sees."""
+    if not is_admin(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user

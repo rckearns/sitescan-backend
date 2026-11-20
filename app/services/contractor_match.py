@@ -650,23 +650,36 @@ def _roster_hint(name: str) -> str | None:
     return None
 
 
-def _roster_trade(name: str, licenses: list[dict]) -> str:
-    """A trade word in the name wins. A generic name ("C.R. Hipp Construction Co") is only
-    general if the company has no license, or holds a GC license; a trade-only license
-    (plumbing, HVAC, ...) puts it in that trade."""
+# Trades a GC-licensed firm is also listed under. GCs often carry grading, concrete or
+# renovation licenses; one holding plumbing, HVAC or electrical is an MEP firm.
+_MEP_TRADES = ("plumbing", "hvac", "electrical")
+
+
+def _roster_trades(name: str, licenses: list[dict]) -> list[str]:
+    """Every trade a contractor is listed under in the roster. A trade word in the name wins.
+    A generic name ("C.R. Hipp Construction") goes under each trade of its active trade
+    licenses (plumbing and HVAC). A GC-licensed or GC-named firm leaves general only for
+    MEP licenses: GCs often carry grading, concrete or renovation licenses too."""
     t = infer_trade_from_name(name)
     if t and t != "general":
-        return t
+        return [t]
     hint = _roster_hint(name)
     if hint:
-        return hint
-    classes = [str(lic.get("classification") or "").upper() for lic in licenses]
-    if not set(classes) & GC_LICENSES:
-        for c in classes:
-            lt = _LLR_TRADE_MAP.get(c)
-            if lt and lt != "general":
-                return lt
-    return "general"
+        return [hint]
+    active, lapsed, gc_licensed = [], [], False
+    for lic in licenses:
+        is_active = str(lic.get("license_status") or "active").strip().lower() == "active"
+        cls = str(lic.get("classification") or "").upper()
+        lt = _LLR_TRADE_MAP.get(cls)
+        if cls in GC_LICENSES:
+            gc_licensed = True    # even lapsed: the firm has been a GC
+        elif lt and lt != "general":
+            (active if is_active else lapsed).append(lt)
+    if gc_licensed or t == "general":   # GC license, or a "Construction"/"Builders" name
+        trades = [x for x in active if x in _MEP_TRADES]
+    else:
+        trades = active or lapsed
+    return sorted(set(trades)) or ["general"]
 
 
 def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_value: float = 0,
@@ -690,22 +703,25 @@ def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_
             continue
         display_name = max(cdata["names"], key=len)
         licenses = llr.match(norm)
-        assigned = _roster_trade(display_name, licenses)
-        if trade and assigned != trade:
-            continue
+        assigned_trades = _roster_trades(display_name, licenses)
+        if trade:
+            if trade not in assigned_trades:
+                continue
+            assigned_trades = [trade]
         dates = [j.last_date for j in jobs if j.last_date]
-        trade_roster.setdefault(assigned, []).append({
-            "key": norm,
-            "name": display_name,
-            "also_known_as": sorted(cdata["names"] - {display_name}),
-            "trade": assigned,
-            "permit_count": len(cdata["permits"]),
-            "job_count": len(jobs),
-            "open_jobs": sum(1 for j in jobs if _is_open_job(j, now)),
-            "total_permit_value": total,
-            "last_permit_date": max(dates).isoformat() if dates else None,
-            "licenses": licenses,
-        })
+        for assigned in assigned_trades:
+            trade_roster.setdefault(assigned, []).append({
+                "key": norm,
+                "name": display_name,
+                "also_known_as": sorted(cdata["names"] - {display_name}),
+                "trade": assigned,
+                "permit_count": len(cdata["permits"]),
+                "job_count": len(jobs),
+                "open_jobs": sum(1 for j in jobs if _is_open_job(j, now)),
+                "total_permit_value": total,
+                "last_permit_date": max(dates).isoformat() if dates else None,
+                "licenses": licenses,
+            })
 
     result: dict[str, Any] = {}
     for tid in sorted(trade_roster):
@@ -721,7 +737,7 @@ def roster_from(projects: list, llr: LlrIndex, *, trade: str | None = None, min_
         }
     return {
         "total_trades": len(result),
-        "total_contractors": sum(len(t["contractors"]) for t in result.values()),
+        "total_contractors": len({c["key"] for t in result.values() for c in t["contractors"]}),
         "trades": result,
     }
 

@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     constructconnect_api_key: str = ""
     zenrows_api_key: str = ""
 
+    # Google Places: phone, website and address for subs (env GOOGLE_MAPS_API_KEY)
+    google_maps_api_key: str = ""
+    # Most new contractor lookups per daily run (each costs a Places Text Search call)
+    contact_lookups_per_run: int = 300
+
     # AI
     anthropic_api_key: str = ""
     # Model for parcel highest-and-best-use analyses (env PARCEL_ANALYSIS_MODEL).

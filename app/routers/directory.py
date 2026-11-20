@@ -153,12 +153,14 @@ async def gc_leaders(
 @router.get("/trades/contractor/subs")
 async def contractor_subs(
     key: str = Query(..., description="GC key from the roster or leaderboard"),
+    include_residential: bool = Query(False, description="Include subs whose permits are mostly residential"),
+    per_trade: int = Query(15, ge=1, le=1000, description="Most subs returned per trade"),
     _user=Depends(get_current_user),
 ):
-    """Trade contractors who've worked this GC's City of Charleston jobs, by trade."""
+    """Trade contractors who've worked this GC's jobs, by trade, with contact details."""
     from app.services.contractor_match import subs_for_gc
 
-    return await subs_for_gc(key)
+    return await subs_for_gc(key, include_residential=include_residential, per_trade=per_trade)
 
 
 @router.get("/subs")
@@ -166,13 +168,16 @@ async def subs_on_big_jobs(
     min_value: float = Query(5_000_000, ge=0, description="Smallest building permit that counts"),
     days: int = Query(1825, ge=0, le=3650, description="Look-back window in days (0 = all time)"),
     categories: str = Query("", description="Comma-separated permit categories, e.g. education,institutional"),
+    include_residential: bool = Query(False, description="Include subs whose permits are mostly residential"),
+    per_trade: int = Query(15, ge=1, le=1000, description="Most subs returned per trade"),
     _user=Depends(get_current_user),
 ):
-    """Subs proven on large commercial jobs, by trade."""
+    """Subs proven on large commercial jobs, by trade, with contact details."""
     from app.services.contractor_match import proven_subs
 
     cats = [c.strip() for c in categories.split(",") if c.strip()]
-    return await proven_subs(min_value=min_value, days=days, categories=cats)
+    return await proven_subs(min_value=min_value, days=days, categories=cats,
+                             include_residential=include_residential, per_trade=per_trade)
 
 
 @router.get("/trades/list")

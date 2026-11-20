@@ -81,6 +81,12 @@ async def awards_job():
     await run_awards_job()
 
 
+async def contacts_job():
+    """Look up phone/website/address for subs that have none yet (never raises)."""
+    from app.services.contractor_contacts import run_contacts_job
+    await run_contacts_job()
+
+
 async def parcel_estimates_job():
     """Pre-generate AI estimates for the top Home page parcels (never raises)."""
     await run_parcel_estimates_job()
@@ -207,6 +213,23 @@ async def lifespan(app: FastAPI):
         trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(minutes=9)),
         id="awards_startup",
         name="State award notices (startup)",
+        replace_existing=True,
+    )
+    # Sub contacts: daily at 11:30 UTC plus ~12 min after startup (after the permits scan).
+    scheduler.add_job(
+        contacts_job,
+        trigger=CronTrigger(hour=11, minute=30, timezone="UTC"),
+        id="contacts_daily",
+        name="Sub contacts (daily)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        contacts_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(minutes=12)),
+        id="contacts_startup",
+        name="Sub contacts (startup)",
         replace_existing=True,
     )
     scheduler.start()

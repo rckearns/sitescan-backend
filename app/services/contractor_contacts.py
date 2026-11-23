@@ -8,7 +8,9 @@ says whether the sub is local to the market (permit_sources.Market).
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -38,13 +40,54 @@ def _component(place: dict, kind: str, short: bool = False) -> str:
     return ""
 
 
-def best_listing(name: str, places: list[dict]) -> dict | None:
-    """The first result whose business name matches the permit name; Places returns the
-    nearest plausible business, which for a small sub is often someone else."""
-    from app.services.contractor_match import _MATCH_THRESHOLD, match_score
+US_STATES = set("""AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV
+NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY""".split())
+# Listings farther than this from the market need an exact name; licensed-local subs must be nearer.
+NEAR_KM = 250
+LICENSED_NEAR_KM = 80
+
+
+def _km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    (lat1, lng1), (lat2, lng2) = a, b
+    p = math.pi / 180
+    h = math.sin((lat2 - lat1) * p / 2) ** 2 + math.cos(lat1 * p) * math.cos(lat2 * p) * math.sin((lng2 - lng1) * p / 2) ** 2
+    return 12742 * math.asin(math.sqrt(h))
+
+
+def licensed_in(market: Market | None, licenses: list[dict]) -> bool:
+    """The sub holds a state license registered in one of the market's cities, so its business is local."""
+    if not market or not market.license_cities:
+        return False
+    cities = {c.lower() for c in market.license_cities}
+    return any((lic.get("city") or "").strip().lower() in cities for lic in licenses)
+
+
+def listing_ok(name: str, listing: str, lat: float | None, lng: float | None, state: str,
+               market: Market | None, licensed_local: bool = False) -> bool:
+    """Is this Google listing the sub? Places returns the nearest plausible business, which for a
+    small sub is often someone else: BE Electrical of SC (licensed in Charleston) came back as
+    BE Electric Co in St. Augustine, FL; Jana Electric as a shop in India."""
+    from app.services.contractor_match import _MATCH_THRESHOLD, match_score, normalize_name
+    if not listing or match_score(listing, name) < _MATCH_THRESHOLD:
+        return False
+    if not market or lat is None or lng is None:
+        return True
+    km = _km(market.center, (lat, lng))
+    if licensed_local:
+        return km <= LICENSED_NEAR_KM
+    if km <= NEAR_KM:
+        return True
+    return state in US_STATES and normalize_name(listing) == normalize_name(name)
+
+
+def best_listing(name: str, places: list[dict], market: Market | None = None,
+                 licensed_local: bool = False) -> dict | None:
+    """The first result that passes listing_ok."""
     for place in places:
         listing = ((place.get("displayName") or {}).get("text") or "").strip()
-        if listing and match_score(listing, name) >= _MATCH_THRESHOLD:
+        loc = place.get("location") or {}
+        state = profile_fields(place).get("state", "")
+        if listing_ok(name, listing, loc.get("latitude"), loc.get("longitude"), state, market, licensed_local):
             return place
     return None
 
@@ -81,9 +124,16 @@ async def search_places(client: httpx.AsyncClient, api_key: str, name: str, mark
     return resp.json().get("places") or []
 
 
-def _due(row: ContractorProfile | None, now: datetime) -> bool:
+def _row_ok(row: ContractorProfile, name: str, market: Market | None, licensed_local: bool) -> bool:
+    return listing_ok(name, row.listing_name, row.latitude, row.longitude, row.state, market, licensed_local)
+
+
+def _due(row: ContractorProfile | None, now: datetime, name: str = "", market: Market | None = None,
+         licensed_local: bool = False) -> bool:
     if row is None:
         return True
+    if row.status == "found" and name and not _row_ok(row, name, market, licensed_local):
+        return True          # matched under looser rules; look again
     age = now - (row.looked_up_at or datetime.min)
     if row.status == "not_found":
         return age > RETRY_NOT_FOUND
@@ -92,9 +142,14 @@ def _due(row: ContractorProfile | None, now: datetime) -> bool:
     return False
 
 
-async def lookup_missing(names: dict[str, tuple[str, str]], limit: int | None = None) -> dict[str, int]:
-    """Look up contractors with no listing yet. `names` maps key -> (name, market id).
-    Returns counts; does nothing without GOOGLE_MAPS_API_KEY."""
+def _unpack(v: tuple) -> tuple[str, str, bool]:
+    name, market_id, *rest = v
+    return name, market_id, bool(rest and rest[0])
+
+
+async def lookup_missing(names: dict[str, tuple], limit: int | None = None) -> dict[str, int]:
+    """Look up contractors with no listing yet. `names` maps key -> (name, market id[, licensed
+    locally]). Returns counts; does nothing without GOOGLE_MAPS_API_KEY."""
     settings = get_settings()
     if not settings.google_maps_api_key:
         log.info("Contact lookup skipped: GOOGLE_MAPS_API_KEY not set")
@@ -105,14 +160,17 @@ async def lookup_missing(names: dict[str, tuple[str, str]], limit: int | None = 
     async with get_session_factory()() as db:
         rows = {r.key: r for r in (await db.execute(
             select(ContractorProfile).where(ContractorProfile.key.in_(list(names))))).scalars().all()}
-        todo = [k for k in names if _due(rows.get(k), now)][:limit]
+        def market_of(mid: str) -> Market:
+            return MARKETS.get(mid) or next(iter(MARKETS.values()))
+        todo = [k for k in names if _due(rows.get(k), now, _unpack(names[k])[0],
+                                         market_of(_unpack(names[k])[1]), _unpack(names[k])[2])][:limit]
         async with httpx.AsyncClient() as client:
             for key in todo:
-                name, market_id = names[key]
-                market = MARKETS.get(market_id) or next(iter(MARKETS.values()))
+                name, market_id, licensed_local = _unpack(names[key])
+                market = market_of(market_id)
                 try:
                     fields = profile_fields(best_listing(name, await search_places(
-                        client, settings.google_maps_api_key, name, market)))
+                        client, settings.google_maps_api_key, name, market), market, licensed_local))
                 except Exception as exc:     # one bad lookup never stops the run
                     log.warning("Places lookup failed for %r: %s", name, exc)
                     fields = {"status": "error"}
@@ -138,15 +196,19 @@ async def load_profiles(keys: list[str]) -> dict[str, ContractorProfile]:
     return {r.key: r for r in rows}
 
 
-def contact_out(row: ContractorProfile | None, market: Market | None) -> dict[str, Any]:
-    """What the subs lists show: contact details and whether the sub is local."""
+def contact_out(row: ContractorProfile | None, market: Market | None, name: str = "",
+                licensed_local: bool = False) -> dict[str, Any]:
+    """What the subs lists show: contact details and whether the sub is local. A sub licensed
+    in the market's cities is local even when no listing passes."""
+    if row is not None and row.status == "found" and name and not _row_ok(row, name, market, licensed_local):
+        row = SimpleNamespace(status="not_found")      # an old, looser match: hide until re-checked
     if row is None or row.status != "found":
-        return {"contact": None, "local": None,
+        return {"contact": None, "local": True if licensed_local else None,
                 "contact_status": "pending" if row is None else row.status}
     return {
         "contact": {"phone": row.phone, "website": row.website, "address": row.address,
                     "city": row.city, "state": row.state, "listing_name": row.listing_name},
-        "local": market.is_local(row.state, row.county) if market else None,
+        "local": True if licensed_local else (market.is_local(row.state, row.county) if market else None),
         "contact_status": "found",
     }
 

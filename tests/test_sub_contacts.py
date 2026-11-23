@@ -106,3 +106,23 @@ def test_lookup_needs_an_api_key(monkeypatch):
     import asyncio
     monkeypatch.setattr(cc, "get_settings", lambda: SimpleNamespace(google_maps_api_key="", contact_lookups_per_run=10))
     assert asyncio.run(cc.lookup_missing({"a": ("A", "charleston-sc")})) == {"skipped": 1}
+
+
+def test_far_listings_need_an_exact_name_and_licensed_subs_stay_near():
+    chs = ps.MARKETS["charleston-sc"]
+    ok = lambda name, listing, lat, lng, st, lic=False: cc.listing_ok(name, listing, lat, lng, st, chs, lic)
+    assert ok("Hyman Plumbing Co.", "Hyman Plumbing Company", 33.0, -80.1, "SC")                  # near
+    assert not ok("BE Electrical of SC LLC", "BE Electric Co", 29.9, -81.3, "FL")                  # far, loose
+    assert ok("POWER DESIGN, Inc.", "Power Design, Inc.", 27.8, -82.6, "FL")                      # far, exact
+    assert not ok("Jana Electric Inc", "The Jana Electric", 22.6, 88.4, "WB")                     # not the US
+    assert not ok("Osborne Electrical, LLC", "Osborne Electrical LLC", 35.5, -97.5, "OK", lic=True)  # licensed here
+    assert cc.licensed_in(chs, [{"city": "Summerville"}]) and not cc.licensed_in(chs, [{"city": "Columbia"}])
+
+
+def test_licensed_local_sub_is_local_without_a_listing():
+    out = cc.contact_out(None, ps.MARKETS["charleston-sc"], "Ghost Electric", licensed_local=True)
+    assert out["local"] is True and out["contact"] is None
+    far = SimpleNamespace(status="found", listing_name="BE Electric Co", latitude=29.9, longitude=-81.3, state="FL",
+                          county="St. Johns County", phone="1", website="", address="", city="St. Augustine")
+    hidden = cc.contact_out(far, ps.MARKETS["charleston-sc"], "BE Electrical of SC LLC", licensed_local=True)
+    assert hidden["contact"] is None and hidden["local"] is True

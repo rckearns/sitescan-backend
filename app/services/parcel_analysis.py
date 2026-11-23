@@ -397,8 +397,15 @@ async def generate_analysis(
     model = model_name()
     if client is None:
         client = anthropic.AsyncAnthropic(api_key=api_key or get_settings().anthropic_api_key)
-    prompt = build_prompt(parcel, zoning)
-    # One retry: overloads and the odd malformed or cut-off answer usually clear on a second try.
+    analysis = await _ask(client, model, build_prompt(parcel, zoning), tms)
+    analysis["model"] = model
+    analysis["rezoning_checked"] = REZONING_PROMPT_REV
+    return finalize_analysis(analysis, land_basis(parcel), zoning)
+
+
+async def _ask(client: Any, model: str, prompt: str, tms: str) -> dict:
+    """One Claude call returning parsed JSON, with one retry: overloads and the odd
+    malformed or cut-off answer usually clear on a second try."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
             message = await client.messages.create(
@@ -414,17 +421,60 @@ async def generate_analysis(
                 continue
             raise AnalysisError(f"AI analysis failed: {str(e)[:200]}") from e
         try:
-            analysis = _parse_json(raw)
-            break
+            return _parse_json(raw)
         except json.JSONDecodeError as e:
             stop = getattr(message, "stop_reason", None)
             logger.error(f"Claude returned invalid JSON for TMS {tms} (attempt {attempt}, stop_reason={stop}): {e}")
             if attempt < ATTEMPTS:
                 continue
             raise AnalysisInvalidJSON("AI returned invalid response") from e
-    analysis["model"] = model
-    analysis["rezoning_checked"] = REZONING_PROMPT_REV
-    return finalize_analysis(analysis, land_basis(parcel), zoning)
+    raise AnalysisError("AI analysis failed")
+
+
+MAX_REQUESTED_USE_CHARS = 80
+
+
+def clean_requested_use(use: str) -> str:
+    return " ".join(str(use or "").replace("\n", " ").split())[:MAX_REQUESTED_USE_CHARS]
+
+
+async def add_custom_scenario(parcel: dict, tms: str, use: str, analysis: dict,
+                              api_key: Optional[str] = None, client: Optional[Any] = None) -> dict:
+    """Ask for one scenario for a use the user names ("boutique hotel") and add it to an
+    existing analysis, replacing an earlier request for the same use. Zoning and land basis
+    come from the stored analysis. Same rules as the full analysis: if the zoning doesn't
+    allow the use, it's still modeled, as not allowed, with the approvals it would need."""
+    use = clean_requested_use(use)
+    if not use:
+        raise AnalysisError("Say what use to model")
+    if client is None:
+        client = anthropic.AsyncAnthropic(api_key=api_key or get_settings().anthropic_api_key)
+    zoning = analysis.get("zoning")
+    basis = int(analysis.get("land_basis") or land_basis(parcel))
+    prompt = (build_prompt(parcel, zoning) + f"""
+
+This time, model ONE scenario for a use the user asked about: "{use}".
+Respond with JSON only: {{"scenario": {{...one scenario object with the same fields as in "scenarios"...}}}}.
+Size it to what this lot, height district and block can realistically hold for that use. If the current
+zoning doesn't allow it, still model it: set "zoning_fit": "not_allowed" and "if_rezoned": true, and use
+zoning_notes to name every approval it would need and how likely that is. Be realistic, not optimistic.""")
+    data = await _ask(client, model_name(), prompt, tms)
+    scenario = data.get("scenario") if isinstance(data.get("scenario"), dict) else (data.get("scenarios") or [None])[0]
+    if not isinstance(scenario, dict) or not isinstance(scenario.get("assumptions"), dict):
+        raise AnalysisInvalidJSON("AI returned no usable scenario")
+    scenario["custom"] = True
+    scenario["requested_use"] = use
+    if scenario.get("zoning_fit") == "not_allowed":
+        scenario["if_rezoned"] = True
+    import copy
+    out = copy.deepcopy(analysis)
+    out["scenarios"] = [s for s in (out.get("scenarios") or [])
+                        if not (s.get("custom") and str(s.get("requested_use", "")).lower() == use.lower())]
+    out["scenarios"].append(scenario)
+    finalized = finalize_analysis(out, basis, zoning, version=analysis.get("version"))
+    if not any(s.get("custom") and s.get("requested_use") == use for s in finalized["scenarios"]):
+        raise AnalysisInvalidJSON("AI's scenario had unusable numbers")
+    return finalized
 
 
 async def get_analysis_row(db: AsyncSession, tms: str) -> Optional[ParcelAnalysis]:

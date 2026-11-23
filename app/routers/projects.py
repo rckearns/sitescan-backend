@@ -248,6 +248,29 @@ async def home_parcels(request: Request, user: User = Depends(get_current_user))
     return Response(content=_home_body["body"], media_type="application/json", headers=headers)
 
 
+@router.get("/home/parcels/lookup")
+async def lookup_home_parcel(
+    q: str = Query(..., min_length=3, max_length=120, description="Address, parcel ID or owner"),
+    user: User = Depends(get_current_user),
+):
+    """Any Charleston County parcel by address, parcel ID or owner. `listed` says whether it's
+    on the underutilized list; `REASON` explains why not."""
+    from app.services.parcels import lookup_parcels
+    try:
+        features = await lookup_parcels(q)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"County parcel request failed: {e}")
+    try:
+        listed = {f["properties"]["TMS"] for f in ranked_home_parcels(await fetch_home_parcel_features())}
+    except httpx.HTTPError:
+        listed = set()
+    for f in features:
+        f["properties"]["LISTED"] = f["properties"]["TMS"] in listed
+        if f["properties"]["LISTED"]:
+            f["properties"].pop("REASON", None)
+    return {"type": "FeatureCollection", "features": features}
+
+
 @router.get("/subcontractors", response_model=SubcontractorListResponse)
 async def list_subcontractors(
     source: Optional[str] = Query(None, description="Filter by source_id (e.g. charleston-permits)"),

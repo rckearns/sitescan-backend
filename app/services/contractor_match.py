@@ -450,6 +450,7 @@ async def load_llr_index(session: AsyncSession) -> LlrIndex:
             entries.setdefault(norm, []).append({
                 "classification": de.classification, "trade_label": de.trade_label,
                 "license_status": de.license_status, "license_number": de.external_id,
+                "city": de.city or "", "state": de.state or "",
             })
     index = LlrIndex(entries)
     _llr_cache.update(at=time.time(), index=index)
@@ -1007,15 +1008,16 @@ async def load_residential_index(db: AsyncSession) -> dict[str, tuple[int, int]]
     return index
 
 
-async def _with_contacts(trades: dict[str, Any]) -> dict[str, Any]:
+async def _with_contacts(trades: dict[str, Any], llr: LlrIndex) -> dict[str, Any]:
     """Add each shown sub's phone, website, address and whether it's local to the job's market."""
-    from app.services.contractor_contacts import contact_out, load_profiles
+    from app.services.contractor_contacts import contact_out, licensed_in, load_profiles
     keys = list({r["key"] for t in trades.values() for r in t["subs"]})
     profiles = await load_profiles(keys)
     for t in trades.values():
         for r in t["subs"]:
             market = market_for(r["jobs"][0]["source_id"]) if r["jobs"] else None
-            r.update(contact_out(profiles.get(r["key"]), market))
+            r.update(contact_out(profiles.get(r["key"]), market, r["name"],
+                                 licensed_in(market, llr.match(r["key"]))))
     return trades
 
 
@@ -1039,7 +1041,7 @@ async def subs_for_gc(key: str, include_residential: bool = False, per_trade: in
     links = [l for l in link_subs(jobs, trade, llr) if normalize_name(l[2]) != key]
     trades = aggregate_subs(links, llr, per_trade=per_trade, residential=residential,
                             include_residential=include_residential)
-    return {"key": key, "jobs_checked": len(jobs), "trades": await _with_contacts(trades)}
+    return {"key": key, "jobs_checked": len(jobs), "trades": await _with_contacts(trades, llr)}
 
 
 async def proven_subs(min_value: float = 5_000_000, days: int = 1825, categories: list | None = None,
@@ -1061,17 +1063,21 @@ async def proven_subs(min_value: float = 5_000_000, days: int = 1825, categories
     trades = aggregate_subs(link_subs(jobs, trade, llr), llr, per_trade=per_trade, residential=residential,
                             include_residential=include_residential)
     if contacts:
-        trades = await _with_contacts(trades)
+        trades = await _with_contacts(trades, llr)
     return {"min_value": min_value, "days": days, "jobs_checked": len(jobs), "trades": trades}
 
 
-async def sub_names_for_lookup() -> dict[str, tuple[str, str]]:
+async def sub_names_for_lookup() -> dict[str, tuple[str, str, bool]]:
     """Every sub the subs lists can show (widest settings: $1M+ jobs, 5 years, non-residential),
-    as key -> (name, market id), for the daily contact lookup."""
+    as key -> (name, market id, holds a license in that market), for the daily contact lookup."""
+    from app.services.contractor_contacts import licensed_in
     out = await proven_subs(min_value=1_000_000, days=1825, per_trade=100_000, contacts=False)
-    names: dict[str, tuple[str, str]] = {}
+    async with get_session_factory()() as db:
+        llr = await load_llr_index(db)
+    names: dict[str, tuple[str, str, bool]] = {}
     for t in out["trades"].values():
         for r in t["subs"]:
             market = market_for(r["jobs"][0]["source_id"]) if r["jobs"] else None
-            names.setdefault(r["key"], (r["name"], market.id if market else ""))
+            names.setdefault(r["key"], (r["name"], market.id if market else "",
+                                        licensed_in(market, llr.match(r["key"]))))
     return names

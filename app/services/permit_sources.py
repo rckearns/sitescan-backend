@@ -28,6 +28,7 @@ class Market:
     state: str
     counties: tuple[str, ...]          # "Charleston County, SC" (county as Google writes it)
     center: tuple[float, float]        # lat, lng
+    license_cities: tuple[str, ...] = ()   # cities the state license list is scraped for here
 
     def is_local(self, state: str | None, county: str | None) -> bool | None:
         """None when the sub's address is unknown."""
@@ -38,7 +39,10 @@ class Market:
 
 MARKETS: dict[str, Market] = {m.id: m for m in [
     Market("charleston-sc", "Charleston", "SC",
-           ("Charleston County, SC", "Berkeley County, SC", "Dorchester County, SC"), (32.7765, -79.9311)),
+           ("Charleston County, SC", "Berkeley County, SC", "Dorchester County, SC"), (32.7765, -79.9311),
+           license_cities=("Charleston", "North Charleston", "Mount Pleasant", "Summerville", "Ladson",
+                           "Goose Creek", "Hanahan", "Johns Island", "James Island", "West Ashley",
+                           "Moncks Corner", "Ridgeville", "Walterboro")),
     Market("charlotte-nc", "Charlotte", "NC",
            ("Mecklenburg County, NC", "Cabarrus County, NC", "Gaston County, NC", "Union County, NC",
             "Iredell County, NC", "York County, SC", "Lancaster County, SC"), (35.2271, -80.8431)),

@@ -24,6 +24,7 @@ class Token(BaseModel):
 class UserProfile(BaseModel):
     id: int
     email: str
+    is_admin: bool = False
     full_name: str
     company: str
     phone: str

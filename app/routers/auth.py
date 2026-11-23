@@ -55,7 +55,8 @@ async def login(data: UserLogin, db: AsyncSession = Depends(get_db)):
 @router.get("/me", response_model=UserProfile)
 async def get_profile(user: User = Depends(get_current_user)):
     """Get current user profile."""
-    return user
+    from app.auth import is_admin
+    return UserProfile.model_validate(user, from_attributes=True).model_copy(update={"is_admin": is_admin(user)})
 
 
 @router.patch("/me", response_model=UserProfile)

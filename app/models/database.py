@@ -313,6 +313,19 @@ class ContractorProfile(Base):
     looked_up_at = Column(DateTime, default=datetime.utcnow)
 
 
+class UsageEvent(Base):
+    """One API request: who made it, which endpoint, how it went. For the admin usage page."""
+    __tablename__ = "usage_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    at = Column(DateTime, default=datetime.utcnow, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    method = Column(String(10), default="")
+    route = Column(String(200), default="")     # the route template: /api/v1/directory/subs
+    status = Column(Integer, default=0)
+    ms = Column(Integer, default=0)
+
+
 class PipelineProject(Base):
     """One construction project tracked from early signals to solicitation (GC pipeline)."""
     __tablename__ = "pipeline_projects"

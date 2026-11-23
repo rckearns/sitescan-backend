@@ -20,7 +20,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from app.config import Settings, get_settings
 from app.models.database import init_db, get_session_factory
-from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router, pipeline_router, awards_router
+from app.routers import auth_router, projects_router, scan_router, contractors_router, profile_router, directory_router, analyze_router, boards_router, pipeline_router, awards_router, admin_router
 from app.services.orchestrator import scheduled_scan_job
 from app.services.notifications import process_alerts
 from app.services.parcel_analysis import run_parcel_estimates_job
@@ -232,6 +232,12 @@ async def lifespan(app: FastAPI):
         name="Sub contacts (startup)",
         replace_existing=True,
     )
+    # Usage events: written once a minute, pruned daily.
+    from app.services.usage import flush as usage_flush, prune as usage_prune
+    scheduler.add_job(usage_flush, trigger=IntervalTrigger(minutes=1), id="usage_flush",
+                      name="Usage events flush", replace_existing=True, max_instances=1, coalesce=True)
+    scheduler.add_job(usage_prune, trigger=CronTrigger(hour=7, minute=10, timezone="UTC"), id="usage_prune",
+                      name="Usage events prune", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.start()
     logger.info(f"Scheduler started — scanning every {settings.scan_cron_hours} hours")
     
@@ -239,6 +245,7 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     scheduler.shutdown(wait=False)
+    await usage_flush()
     logger.info("Scheduler stopped")
 
 
@@ -258,6 +265,25 @@ app = FastAPI(
     redoc_url=None,
     openapi_url="/openapi.json" if os.environ.get("ENABLE_API_DOCS") == "1" else None,
 )
+
+
+@app.middleware("http")
+async def record_usage(request: Request, call_next):
+    """Record each API request for the admin usage page (buffered; see services/usage.py)."""
+    import time as _time
+    start = _time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        path = request.url.path
+        if path.startswith("/api/") and request.method != "OPTIONS":
+            from app.services import usage
+            route = getattr(request.scope.get("route"), "path", None) or path
+            usage.record(usage.user_id_from_auth(request.headers.get("authorization")), request.method,
+                         route, status, (_time.perf_counter() - start) * 1000)
 
 
 @app.middleware("http")
@@ -312,6 +338,7 @@ app.include_router(analyze_router, prefix="/api/v1")
 app.include_router(boards_router, prefix="/api/v1")
 app.include_router(pipeline_router, prefix="/api/v1")
 app.include_router(awards_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 
 # ─── HEALTH CHECK ────────────────────────────────────────────────────────────

@@ -233,9 +233,11 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     # Usage events: written once a minute, pruned daily.
-    from app.services.usage import flush as usage_flush, prune as usage_prune
+    from app.services.usage import flush as usage_flush, prune as usage_prune, lookup_ips
     scheduler.add_job(usage_flush, trigger=IntervalTrigger(minutes=1), id="usage_flush",
                       name="Usage events flush", replace_existing=True, max_instances=1, coalesce=True)
+    scheduler.add_job(lookup_ips, trigger=IntervalTrigger(minutes=10), id="ip_lookups",
+                      name="Visitor IP lookups", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.add_job(usage_prune, trigger=CronTrigger(hour=7, minute=10, timezone="UTC"), id="usage_prune",
                       name="Usage events prune", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.start()
@@ -283,7 +285,8 @@ async def record_usage(request: Request, call_next):
             from app.services import usage
             route = getattr(request.scope.get("route"), "path", None) or path
             usage.record(usage.user_id_from_auth(request.headers.get("authorization")), request.method,
-                         route, status, (_time.perf_counter() - start) * 1000)
+                         route, status, (_time.perf_counter() - start) * 1000,
+                         usage.client_ip(request.headers, request.client.host if request.client else None))
 
 
 @app.middleware("http")

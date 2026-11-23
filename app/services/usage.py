@@ -2,7 +2,9 @@
 summarized for admins at GET /api/v1/admin/usage.
 
 Requests are buffered in memory and written in batches once a minute, so recording never
-slows a request down. Events older than RETENTION_DAYS are deleted daily.
+slows a request down. Events older than RETENTION_DAYS are deleted daily; their IP addresses
+are cleared after IP_RETENTION_DAYS. Each new IP's approximate city and network come from
+ipinfo.io (IPINFO_TOKEN raises the free limit), looked up once in the background.
 """
 from __future__ import annotations
 
@@ -12,13 +14,18 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+import ipaddress
 
-from app.models.database import UsageEvent, User, get_session_factory
+import httpx
+from sqlalchemy import delete, insert, select, update
+
+from app.models.database import IpLookup, UsageEvent, User, get_session_factory
 
 log = logging.getLogger("sitescan.usage")
 
 RETENTION_DAYS = 180
+IP_RETENTION_DAYS = 90
+IP_LOOKUPS_PER_RUN = 200
 MAX_BUFFER = 20_000          # drop rather than grow without bound if the database is down
 _buffer: list[dict] = []
 
@@ -61,10 +68,21 @@ def user_id_from_auth(header: str | None) -> int | None:
         return None
 
 
-def record(user_id: int | None, method: str, route: str, status: int, ms: float) -> None:
+def client_ip(headers, peer: str | None) -> str | None:
+    """The visitor's IP: Railway's edge puts it in X-Real-IP / the first X-Forwarded-For entry."""
+    for raw in (headers.get("x-real-ip"), (headers.get("x-forwarded-for") or "").split(",")[0], peer):
+        raw = (raw or "").strip()
+        try:
+            return str(ipaddress.ip_address(raw))
+        except ValueError:
+            continue
+    return None
+
+
+def record(user_id: int | None, method: str, route: str, status: int, ms: float, ip: str | None = None) -> None:
     if len(_buffer) < MAX_BUFFER:
         _buffer.append({"at": datetime.utcnow(), "user_id": user_id, "method": method[:10],
-                        "route": route[:200], "status": status, "ms": int(ms)})
+                        "route": route[:200], "status": status, "ms": int(ms), "ip": ip})
 
 
 async def flush() -> int:
@@ -85,11 +103,90 @@ async def flush() -> int:
 
 async def prune() -> None:
     try:
+        now = datetime.utcnow()
         async with get_session_factory()() as db:
-            await db.execute(delete(UsageEvent).where(UsageEvent.at < datetime.utcnow() - timedelta(days=RETENTION_DAYS)))
+            await db.execute(delete(UsageEvent).where(UsageEvent.at < now - timedelta(days=RETENTION_DAYS)))
+            await db.execute(update(UsageEvent).where(UsageEvent.at < now - timedelta(days=IP_RETENTION_DAYS),
+                                                      UsageEvent.ip.is_not(None)).values(ip=None))
             await db.commit()
     except Exception as exc:
         log.warning("Usage prune failed: %s", exc)
+
+
+def _public(ip: str) -> bool:
+    try:
+        a = ipaddress.ip_address(ip)
+        return not (a.is_private or a.is_loopback or a.is_reserved or a.is_link_local)
+    except ValueError:
+        return False
+
+
+async def lookup_ips(limit: int = IP_LOOKUPS_PER_RUN) -> int:
+    """Look up city/region/network for recent IPs that have none yet (never raises)."""
+    import os
+    try:
+        since = datetime.utcnow() - timedelta(days=IP_RETENTION_DAYS)
+        async with get_session_factory()() as db:
+            seen = {r[0] for r in await db.execute(
+                select(UsageEvent.ip).where(UsageEvent.ip.is_not(None), UsageEvent.at >= since).distinct())}
+            done = {r[0] for r in await db.execute(select(IpLookup.ip))}
+            todo = [ip for ip in seen - done if _public(ip)][:limit]
+            if not todo:
+                return 0
+            token = os.environ.get("IPINFO_TOKEN", "")
+            async with httpx.AsyncClient(timeout=10) as client:
+                for ip in todo:
+                    try:
+                        r = await client.get(f"https://ipinfo.io/{ip}/json", params={"token": token} if token else None)
+                        if r.status_code == 429:
+                            log.info("ipinfo rate limit reached; continuing next run")
+                            break
+                        d = r.json() if r.status_code == 200 else {}
+                    except Exception as exc:
+                        log.debug("ipinfo %s failed: %s", ip, exc)
+                        continue
+                    db.add(IpLookup(ip=ip, city=(d.get("city") or "")[:120], region=(d.get("region") or "")[:120],
+                                    country=(d.get("country") or "")[:10], org=(d.get("org") or "")[:255],
+                                    hostname=(d.get("hostname") or "")[:255]))
+            await db.commit()
+            return len(todo)
+    except Exception as exc:
+        log.warning("IP lookup failed: %s", exc)
+        return 0
+
+
+def visitors(events: list[Any], users: dict[int, Any], geo: dict[str, Any], limit: int = 300) -> list[dict]:
+    """One row per IP: where it is, which accounts used it, and sign-in attempts."""
+    by_ip: dict[str, dict] = {}
+    for e in events:
+        ip = getattr(e, "ip", None)
+        if not ip:
+            continue
+        v = by_ip.setdefault(ip, {"first": e.at, "last": e.at, "requests": 0, "users": set(),
+                                  "failed_logins": 0, "signups": 0})
+        v["first"], v["last"] = min(v["first"], e.at), max(v["last"], e.at)
+        v["requests"] += 1
+        if e.user_id:
+            v["users"].add(e.user_id)
+        route = e.route or ""
+        if route.endswith("/auth/login") and (e.status or 0) in (400, 401, 403):
+            v["failed_logins"] += 1
+        if route.endswith("/auth/register") and 200 <= (e.status or 0) < 300:
+            v["signups"] += 1
+    rows = []
+    for ip, v in by_ip.items():
+        g = geo.get(ip)
+        org = getattr(g, "org", "") or ""
+        rows.append({
+            "ip": ip,
+            "location": ", ".join(x for x in (getattr(g, "city", ""), getattr(g, "region", ""), getattr(g, "country", "")) if x),
+            "network": org.split(" ", 1)[1] if org.startswith("AS") and " " in org else org,
+            "first_seen": v["first"].isoformat(), "last_seen": v["last"].isoformat(),
+            "requests": v["requests"], "failed_logins": v["failed_logins"], "signups": v["signups"],
+            "accounts": sorted(getattr(users.get(u), "email", f"user {u}") for u in v["users"]),
+        })
+    rows.sort(key=lambda r: r["last_seen"], reverse=True)
+    return rows[:limit]
 
 
 def _p95(values: list[int]) -> int:
@@ -172,4 +269,9 @@ async def usage_report(days: int = 30) -> dict[str, Any]:
     async with get_session_factory()() as db:
         events = (await db.execute(select(UsageEvent).where(UsageEvent.at >= since))).scalars().all()
         users = {u.id: u for u in (await db.execute(select(User))).scalars().all()}
-    return summarize(events, users, days, now)
+        ips = {e.ip for e in events if getattr(e, "ip", None)}
+        geo = {g.ip: g for g in (await db.execute(select(IpLookup).where(IpLookup.ip.in_(list(ips))))).scalars().all()} if ips else {}
+    report = summarize(events, users, days, now)
+    report["visitors"] = visitors(events, users, geo)
+    report["ip_retention_days"] = IP_RETENTION_DAYS
+    return report

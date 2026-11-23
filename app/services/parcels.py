@@ -111,10 +111,16 @@ def county_where_clause() -> str:
 
 
 def exempt_where_clause() -> str:
-    """$0-assessed parking, vacant and commercial lots of EXEMPT_MIN_ACRES or more."""
+    """$0-assessed parking, vacant and commercial lots of EXEMPT_MIN_ACRES or more, plus
+    commercial lots the county left unassessed (blank values, e.g. the City's lot at
+    129 Columbus St). Blank vacant-residential lots are new subdivision lots, not sites."""
     codes = " OR ".join(f"{_C}CLASS_CODE LIKE '{c}%'" for c in EXEMPT_CLASS_LABELS)
-    return (f"({codes}) AND {_C}LAND_APPR = 0 AND {_C}IMP_APPR = 0 "
-            f"AND {_P}ACRES_CAL >= {EXEMPT_MIN_ACRES} AND {_P}ACRES_CAL <= {EXEMPT_MAX_ACRES}")
+    blank_codes = " OR ".join(f"{_C}CLASS_CODE LIKE '{c}%'" for c in COUNTY_CLASS_LABELS)
+    size = f"{_P}ACRES_CAL >= {EXEMPT_MIN_ACRES} AND {_P}ACRES_CAL <= {EXEMPT_MAX_ACRES}"
+    zero = f"({codes}) AND {_C}LAND_APPR = 0 AND {_C}IMP_APPR = 0"
+    blank = (f"({blank_codes}) AND ({_C}LAND_APPR IS NULL OR {_C}LAND_APPR = 0) "
+             f"AND ({_C}IMP_APPR IS NULL OR {_C}IMP_APPR = 0) AND ({_C}LAND_APPR IS NULL OR {_C}IMP_APPR IS NULL)")
+    return f"(({zero}) OR ({blank})) AND {size}"
 
 
 def _clean(v: Any) -> str:
@@ -161,6 +167,7 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
         return None
     code = _clean(a.get(_C + "CLASS_CODE"))[:3]
     exempt = not (a.get(_C + "LAND_APPR") or 0) and not (a.get(_C + "IMP_APPR") or 0)
+    unassessed = exempt and (a.get(_C + "LAND_APPR") is None or a.get(_C + "IMP_APPR") is None)
     house = _clean(a.get(_C + "PROP_ST_NO"))
     street = _clean(a.get(_C + "PROP_ST_NAME"))
     land = a.get(_C + "LAND_APPR") or 0
@@ -178,6 +185,7 @@ def county_feature_to_parcel(feat: dict) -> Optional[dict]:
             "CLASS_CODE": code,
             "GENUSE": EXEMPT_CLASS_LABELS.get(code, "Commercial"),
             **({"EXEMPT": True} if exempt else {}),
+            **({"UNASSESSED": True} if unassessed else {}),
             "LAND_APPR": land,
             "IMP_APPR": imp,
             "APPRVAL": a.get(_C + "APPRAISAL") or (land + imp),
@@ -525,3 +533,95 @@ def rank_parcels(features: list[dict], min_score: int = MIN_OPPORTUNITY_SCORE) -
             scored.append((score, value, props))
     scored.sort(key=lambda t: (-t[0], -t[1]))
     return [props for _, _, props in scored]
+
+
+# ─── LOOKUP: any county parcel, and why it is or isn't on the list ───────────
+
+def _sql_text(s: str) -> str:
+    return re.sub(r"[^A-Z0-9 .&'-]", "", s.upper()).replace("'", "''").strip()
+
+
+def lookup_where_clause(query: str) -> Optional[str]:
+    """Address ("131 Coming", "131 Coming St"), parcel ID (10 digits) or owner name."""
+    q = re.sub(r"\s+", " ", query or "").strip()
+    digits = re.sub(r"\D", "", q)
+    if len(digits) == 10 and re.fullmatch(r"[\d\s-]+", q):
+        return f"{_P}PID = '{digits}'"
+    m = re.match(r"^(\d+[A-Za-z]?)\s+(.+)$", q)
+    if m:
+        street = re.sub(r"\b(ST|STREET|AVE|AVENUE|RD|ROAD|DR|DRIVE|BLVD|LN|LANE|HWY|CT|PL|WAY)\.?$", "",
+                        m.group(2).upper()).strip()
+        street = _sql_text(street)
+        if street:
+            return f"{_C}PROP_ST_NO = '{_sql_text(m.group(1))}' AND {_C}PROP_ST_NAME LIKE '{street}%'"
+    text = _sql_text(q)
+    if len(text) < 3:
+        return None
+    return f"({_C}OWNER1 LIKE '%{text}%' OR {_C}PROP_ST_NAME LIKE '{text}%')"
+
+
+def why_not_listed(raw_attrs: dict, props: dict) -> Optional[str]:
+    """Plain-language reason a parcel isn't on the underutilized list, or None if it qualifies."""
+    cls = _clean(raw_attrs.get(_C + "CLASS_CODE"))
+    code = cls[:3]
+    land, imp = props.get("LAND_APPR") or 0, props.get("IMP_APPR") or 0
+    acres = props.get("GISACRES") or 0
+    exempt = not land and not imp
+    use = cls.split(" - ", 1)[-1].title() if " - " in cls else (cls or "unknown")
+    if exempt:
+        if props.get("UNASSESSED") and code not in COUNTY_CLASS_LABELS:
+            return (f"Not yet assessed and coded {use} ({code}); unassessed lots are only listed when "
+                    "coded commercial, vacant commercial, development acreage or parking.")
+        if code not in EXEMPT_CLASS_LABELS:
+            return (f"Tax-exempt and coded {use} ({code}) by the county; the list only takes exempt land "
+                    "coded vacant, parking or commercial, since most other exempt parcels hold a church, school or park.")
+        if NOT_FOR_SALE_OWNER_RE.search(props.get("OWNER") or ""):
+            return "Federal or state owner; that land isn't for sale."
+        kind = "Unassessed" if props.get("UNASSESSED") else "Tax-exempt"
+        if not _in_peninsula(props):
+            return f"{kind} lot outside the Peninsula; lots without an assessment are only listed on the Peninsula."
+        if acres < EXEMPT_MIN_ACRES:
+            return f"{kind} lot of {acres:.2f} acres; lots without an assessment need at least {EXEMPT_MIN_ACRES} acres."
+        if acres > EXEMPT_MAX_ACRES:
+            return f"{kind} tract of {acres:.1f} acres; larger ones are usually parks, marsh or port land."
+        return None
+    if code not in COUNTY_CLASS_LABELS:
+        return (f"Coded {use} ({code}) by the county; the list covers commercial, vacant commercial, "
+                "development acreage and parking parcels.")
+    if land < MIN_LAND_VALUE:
+        return f"Land assessed at ${land:,.0f}; under ${MIN_LAND_VALUE:,} usually means common area or marsh."
+    if imp >= land:
+        return f"Buildings (${imp:,.0f}) are worth more than the land (${land:,.0f})."
+    score = opportunity_score(props)
+    if score < MIN_OPPORTUNITY_SCORE:
+        return f"Only {score}% underutilized; the list starts at {MIN_OPPORTUNITY_SCORE}%."
+    return None
+
+
+async def lookup_parcels(query: str, limit: int = 10) -> list[dict]:
+    """County parcels matching an address, parcel ID or owner, with `REASON` set when the
+    parcel isn't on the list."""
+    where = lookup_where_clause(query)
+    if not where:
+        return []
+    async with httpx.AsyncClient(timeout=COUNTY_DIRECT_TIMEOUT) as client:
+        data = await _county_page(client, {
+            "where": where, "outFields": COUNTY_OUT_FIELDS, "returnGeometry": "true", "outSR": "4326",
+            "maxAllowableOffset": "0.0001", "geometryPrecision": "6",
+            "resultRecordCount": str(limit), "f": "geojson",
+        }, {})
+    if "error" in data:
+        raise httpx.HTTPError(f"County parcel service error: {data['error']}")
+    out = []
+    for raw in data.get("features") or []:
+        feat = county_feature_to_parcel(raw)
+        if not feat:
+            continue
+        props = feat["properties"]
+        props["USE"] = (_clean((raw.get("properties") or {}).get(_C + "CLASS_CODE")).split(" - ", 1)[-1]).title()
+        reason = why_not_listed(raw.get("properties") or {}, props)
+        if reason:
+            props["REASON"] = reason
+        props["SCORE"] = opportunity_score(props)
+        out.append(feat)
+    return out

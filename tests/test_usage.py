@@ -61,3 +61,25 @@ def test_middleware_records_route_template_and_user():
     assert got[1] == ("/api/v1/admin/usage", 42, True)     # not an admin: 403
     assert len(got) == 2   # /health isn't recorded
     usage._buffer.clear()
+
+
+def test_client_ip_prefers_proxy_headers():
+    assert usage.client_ip({"x-real-ip": "203.0.113.9"}, "10.0.0.1") == "203.0.113.9"
+    assert usage.client_ip({"x-forwarded-for": "198.51.100.4, 10.1.1.1"}, "10.0.0.1") == "198.51.100.4"
+    assert usage.client_ip({"x-forwarded-for": "junk"}, "10.0.0.1") == "10.0.0.1"
+    assert usage.client_ip({}, None) is None
+
+
+def test_visitors_by_ip_with_location_accounts_and_failed_logins():
+    users = {1: SimpleNamespace(email="a@x.com")}
+    geo = {"203.0.113.9": SimpleNamespace(city="Mount Pleasant", region="South Carolina", country="US",
+                                          org="AS7922 Comcast Cable Communications, LLC")}
+    def e(ip, user, route, status, h):
+        return SimpleNamespace(at=NOW - timedelta(hours=h), ip=ip, user_id=user, route=route, status=status)
+    rows = usage.visitors([e("203.0.113.9", None, "/api/v1/auth/login", 401, 3), e("203.0.113.9", 1, "/api/v1/auth/login", 200, 2),
+                           e("198.51.100.4", None, "/api/v1/auth/register", 200, 5), e(None, 1, "/api/v1/projects", 200, 1)], users, geo)
+    assert [r["ip"] for r in rows] == ["203.0.113.9", "198.51.100.4"]
+    assert rows[0]["location"] == "Mount Pleasant, South Carolina, US"
+    assert rows[0]["network"] == "Comcast Cable Communications, LLC"
+    assert rows[0]["accounts"] == ["a@x.com"] and rows[0]["failed_logins"] == 1
+    assert rows[1]["signups"] == 1 and rows[1]["location"] == ""

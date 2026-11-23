@@ -324,6 +324,20 @@ class UsageEvent(Base):
     route = Column(String(200), default="")     # the route template: /api/v1/directory/subs
     status = Column(Integer, default=0)
     ms = Column(Integer, default=0)
+    ip = Column(String(64), nullable=True, index=True)   # cleared after IP_RETENTION_DAYS
+
+
+class IpLookup(Base):
+    """Approximate location and network for a visitor IP (ipinfo.io), looked up once."""
+    __tablename__ = "ip_lookups"
+
+    ip = Column(String(64), primary_key=True)
+    city = Column(String(120), default="")
+    region = Column(String(120), default="")
+    country = Column(String(10), default="")
+    org = Column(String(255), default="")        # "AS7922 Comcast Cable Communications, LLC"
+    hostname = Column(String(255), default="")
+    looked_up_at = Column(DateTime, default=datetime.utcnow)
 
 
 class PipelineProject(Base):
@@ -668,6 +682,8 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_project_types JSON DEFAULT '[]'",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gc_show_unconfirmed BOOLEAN DEFAULT TRUE",
             "ALTER TABLE pipeline_projects ADD COLUMN IF NOT EXISTS is_building_project BOOLEAN",
+            "ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS ip VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_usage_events_ip ON usage_events (ip)",
             # parcel_analyses — created via create_all; migration only needed for existing DBs
             """CREATE TABLE IF NOT EXISTS parcel_analyses (
                 id SERIAL PRIMARY KEY,

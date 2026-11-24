@@ -348,7 +348,7 @@ def test_endpoints_regenerate_stale_and_hide_stale_from_cache(monkeypatch):
     monkeypatch.setattr(analyze, "get_settings", lambda: SimpleNamespace(anthropic_api_key="test"))
     gen_calls = []
 
-    async def fake_generate(parcel, tms, api_key=None, client=None):
+    async def fake_generate(parcel, tms, api_key=None, client=None, filings=None):
         gen_calls.append(tms)
         return pa.finalize_analysis(json.loads(_ai_json()), pa.land_basis(parcel))
     monkeypatch.setattr(analyze, "generate_analysis", fake_generate)

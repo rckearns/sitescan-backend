@@ -111,6 +111,12 @@ curl http://localhost:8000/api/v1/projects?min_match=70&sort_by=match_score \
 - `DELETE /api/v1/pipeline/projects/{id}/save` — Remove them
 - `POST /api/v1/pipeline/notes` — **Admin only** (`ADMIN_EMAILS`). Add research notes: public facts no polled document carries (a zoning appeals ruling, design-packet numbers, press). Every user sees them. Notes join the project's timeline and AI summary but never move its stage; a note's title (text before " – ") becomes the project name. Re-sending a note is a no-op.
 
+### Parcel analysis
+- `POST /api/v1/analyze/parcel/{tms}` — AI highest-and-best-use estimate for a parcel (stored; `refresh=true` redoes it). The model supplies assumptions; the pro forma is computed in code.
+- `GET /api/v1/analyze/parcels/cached?tms=a,b,c` — Stored estimates only; never calls the AI.
+
+When the GC pipeline holds city board items for the parcel (matched by TMS; research notes on the same project count too), a new estimate is given those public filings. It then prices the project **as filed** in one scenario marked `as_proposed` (listed first), and records the filings it saw under `filings`. A stored estimate made before a filing arrived is returned with `filings_changed: true` so the client can offer a re-run; the nightly job redoes the top-ranked parcels on its own. A filing that names several parcels is passed as context only, because the pro forma prices one parcel's land. Per-user pipeline saves are never read. Not matched yet: a parcel listed second on a multi-parcel item, and board items filed under a state project by address.
+
 ### Scan
 - `POST /api/v1/scan/trigger` — Manual scan (all or specific sources)
 - `GET /api/v1/scan/history` — View scan logs
